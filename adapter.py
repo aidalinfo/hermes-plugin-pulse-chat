@@ -36,6 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 from .classification import classify_outbound, parse_tool  # noqa: F401  (re-export)
@@ -55,6 +56,9 @@ _WS_CONNECT_TIMEOUT = 30.0
 _WS_MAX_SIZE = 10 * 1024 * 1024
 _MEDIA_MAX_BYTES = 20 * 1024 * 1024
 _MEDIA_MAX_COUNT = 10
+# Dedup du rejeu serveur : cache borne des derniers message ids traites (un
+# ``message.created`` deja vu est re-acke mais PAS re-dispatche a l'agent).
+_DEDUP_MAX_IDS = 500
 
 
 def _get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -104,6 +108,8 @@ class PulseChatAdapter(BasePlatformAdapter):
         self._ws = None
         self._recv_task: Optional[asyncio.Task] = None
         self._media_dir: Optional[str] = None
+        # Cache borne (FIFO) des derniers message ids traites — dedup du rejeu.
+        self._seen_message_ids: "OrderedDict[str, None]" = OrderedDict()
 
     @property
     def name(self) -> str:
@@ -217,6 +223,14 @@ class PulseChatAdapter(BasePlatformAdapter):
             logger.warning("Pulse Chat: message.created incomplet ignore")
             return
 
+        # Dedup du rejeu : deja traite => re-ack (l'ack initial a pu se perdre)
+        # mais PAS de second handle_message (pas de double dispatch agent).
+        dedup_key = str(message_id)
+        if dedup_key in self._seen_message_ids:
+            logger.debug("Pulse Chat: message %s deja traite, re-ack sans dispatch", dedup_key)
+            await self._send_ack(message_id)
+            return
+
         # Filtre optionnel PULSE_CHAT_CHANNELS (transport, pas metier) :
         # on acke quand meme pour ne pas faire boucler le replay serveur.
         if self.channels and slug not in self.channels:
@@ -245,7 +259,15 @@ class PulseChatAdapter(BasePlatformAdapter):
         )
 
         await self.handle_message(event)
+        self._remember_message_id(dedup_key)
         await self._send_ack(message_id)
+
+    def _remember_message_id(self, key: str) -> None:
+        """Enregistre un id traite dans le cache borne (eviction FIFO)."""
+        self._seen_message_ids[key] = None
+        self._seen_message_ids.move_to_end(key)
+        while len(self._seen_message_ids) > _DEDUP_MAX_IDS:
+            self._seen_message_ids.popitem(last=False)
 
     async def _send_ack(self, message_id: Any) -> None:
         if self._ws is None:
