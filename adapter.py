@@ -4,8 +4,9 @@ Adaptateur MINCE : il traduit et transporte, aucune logique metier (elle vit
 dans l'app Nuxt — cf. CLAUDE.md et spec §6).
 
 Flux :
-- app -> plugin : WebSocket ``ws(s)://<PULSE_CHAT_URL>/ws/hermes?token=...``
-  (librairie ``websockets`` — ``pip install websockets``). Evenements
+- app -> plugin : WebSocket ``ws(s)://<PULSE_CHAT_URL>/ws/hermes`` avec
+  ``Authorization: Bearer <PULSE_CHAT_TOKEN>`` (librairie ``websockets`` —
+  ``pip install websockets``). Evenements
   ``message.created`` -> ``MessageEvent`` -> ``self.handle_message`` -> ack
   ``{"type": "ack", "messageId": ...}`` (le serveur marque ``agentDeliveredAt``
   et rejoue les messages non ackes a la reconnexion).
@@ -74,13 +75,16 @@ def _get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
     return value if value is not None else default
 
 
-def _ws_url(base_url: str, token: str) -> str:
-    """``http(s)://host[/path]`` -> ``ws(s)://host[/path]/ws/hermes?token=...``."""
+def _ws_url(base_url: str) -> str:
+    """``http(s)://host[/path]`` -> ``ws(s)://host[/path]/ws/hermes``.
+
+    Le token de service passe par le header ``Authorization: Bearer …`` —
+    jamais en query string (les URLs finissent dans les logs de proxies).
+    """
     parts = urllib.parse.urlsplit(base_url)
     scheme = "wss" if parts.scheme == "https" else "ws"
     path = parts.path.rstrip("/")
-    query = urllib.parse.urlencode({"token": token})
-    return f"{scheme}://{parts.netloc}{path}/ws/hermes?{query}"
+    return f"{scheme}://{parts.netloc}{path}/ws/hermes"
 
 
 class PulseChatAdapter(BasePlatformAdapter):
@@ -137,12 +141,20 @@ class PulseChatAdapter(BasePlatformAdapter):
             )
             return False
 
-        url = _ws_url(self.base_url, self.token)
+        url = _ws_url(self.base_url)
+        headers = {"Authorization": f"Bearer {self.token}"}
         try:
-            self._ws = await asyncio.wait_for(
-                websockets.connect(url, max_size=_WS_MAX_SIZE),
-                timeout=_WS_CONNECT_TIMEOUT,
-            )
+            # websockets >= 14 : ``additional_headers`` ; anciennes versions
+            # (legacy) : ``extra_headers``. On tente le nom moderne d'abord.
+            try:
+                connection = websockets.connect(
+                    url, max_size=_WS_MAX_SIZE, additional_headers=headers
+                )
+            except TypeError:
+                connection = websockets.connect(
+                    url, max_size=_WS_MAX_SIZE, extra_headers=headers
+                )
+            self._ws = await asyncio.wait_for(connection, timeout=_WS_CONNECT_TIMEOUT)
         except Exception as exc:
             logger.error("Pulse Chat: echec de connexion WS a %s — %s", self.base_url, exc)
             self._set_fatal_error("connect_failed", str(exc), retryable=True)
