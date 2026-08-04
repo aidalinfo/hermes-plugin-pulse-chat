@@ -1,0 +1,32 @@
+name: pulse-chat
+label: Pulse Chat
+kind: platform
+version: 1.0.0
+description: >
+  Adaptateur de plateforme Pulse Chat pour Hermes Agent.
+  Relaie les messages entre l'app Pulse Chat (front de conversation client)
+  et l'agent : WebSocket entrant (app -> plugin) + POST HTTP sortant
+  (plugin -> app) avec classification message / tool_event.
+  Depend de la librairie Python `websockets` (pip install websockets).
+author: Pulse
+
+# Les entrees ``requires_env`` sont exposees dans l'UI ``hermes config``.
+requires_env:
+  - name: PULSE_CHAT_URL
+    description: "URL de base de l'app pulse-chat (ex: https://chat.pulsemyit.fr)"
+    prompt: "URL Pulse Chat"
+    password: false
+  - name: PULSE_CHAT_TOKEN
+    description: "Token de service pour le WebSocket et l'API agent"
+    prompt: "Token Pulse Chat"
+    password: true
+
+optional_env:
+  - name: PULSE_CHAT_CHANNELS
+    description: "Slugs de canaux autorises, separes par des virgules (vide = tous)"
+    prompt: "Canaux (slugs, separes par des virgules — ou vide)"
+    password: false
+  - name: PULSE_CHAT_ALLOW_ALL_USERS
+    description: "Accepter tous les utilisateurs (true — l'app filtre deja via ChannelMember)"
+    prompt: "Autoriser tous les utilisateurs ? (true/false)"
+    password: false
