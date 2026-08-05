@@ -22,6 +22,14 @@ requires_env:
     password: true
 
 optional_env:
+  - name: PULSE_CHAT_PROFILE
+    description: "Profil(s) Hermes servis par ce bot, separes par des virgules (defaut: default)"
+    prompt: "Profils Hermes (separes par des virgules — ou vide pour 'default')"
+    password: false
+  - name: PULSE_CHAT_AGENT_NAME
+    description: "Nom d'affichage de l'agent, envoye dans la frame hello (defaut: nom du premier profil)"
+    prompt: "Nom d'affichage de l'agent (ou vide)"
+    password: false
   - name: PULSE_CHAT_CHANNELS
     description: "Slugs de canaux autorises, separes par des virgules (vide = tous)"
     prompt: "Canaux (slugs, separes par des virgules — ou vide)"

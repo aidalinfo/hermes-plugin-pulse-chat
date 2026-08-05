@@ -21,6 +21,10 @@ La classification message / tool_event est deleguee au module pur
 Configuration (env > config.extra) :
     PULSE_CHAT_URL              URL de base de l'app (http(s)://...)
     PULSE_CHAT_TOKEN            token de service (WS + API)
+    PULSE_CHAT_PROFILE          optionnel — profil(s) Hermes servis par ce bot,
+                                separes par des virgules (defaut: "default")
+    PULSE_CHAT_AGENT_NAME       optionnel — nom d'affichage envoye dans la frame
+                                hello (defaut: nom du premier profil)
     PULSE_CHAT_CHANNELS         optionnel — slugs autorises, separes par des virgules
     PULSE_CHAT_ALLOW_ALL_USERS  optionnel — true (l'app filtre deja via ChannelMember)
 """
@@ -41,6 +45,7 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 from .classification import classify_outbound, parse_tool  # noqa: F401  (re-export)
+from .hello import build_hello, parse_profiles
 
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -102,6 +107,14 @@ class PulseChatAdapter(BasePlatformAdapter):
         ).rstrip("/")
         self.token: str = _get_secret("PULSE_CHAT_TOKEN") or extra.get("token", "")
 
+        # Profils Hermes servis par ce bot + identite annoncee (frame hello).
+        self.profiles: List[str] = parse_profiles(
+            _get_secret("PULSE_CHAT_PROFILE") or extra.get("profile", "")
+        )
+        self.agent_name: str = (
+            _get_secret("PULSE_CHAT_AGENT_NAME") or extra.get("agent_name", "") or ""
+        ).strip() or self.profiles[0]
+
         channels = _get_secret("PULSE_CHAT_CHANNELS") or extra.get("channels", "")
         if isinstance(channels, str):
             self.channels = {c.strip() for c in channels.split(",") if c.strip()}
@@ -160,12 +173,29 @@ class PulseChatAdapter(BasePlatformAdapter):
             self._set_fatal_error("connect_failed", str(exc), retryable=True)
             return False
 
+        # Frame hello AVANT la boucle de reception : le serveur enregistre le
+        # peer pour ces profils (last-wins par profil) puis rejoue les messages
+        # non livres de ces profils. Reconnexion => re-hello (meme chemin).
+        try:
+            await self._ws.send(json.dumps(build_hello(self.profiles, self.agent_name)))
+        except Exception as exc:
+            logger.error("Pulse Chat: echec envoi hello — %s", exc)
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+            self._set_fatal_error("connect_failed", str(exc), retryable=True)
+            return False
+
         self._recv_task = asyncio.create_task(self._receive_loop())
         self._mark_connected()
         logger.info(
-            "Pulse Chat: connecte a %s (%s)",
+            "Pulse Chat: connecte a %s (%s) — profils %s, agent '%s'",
             self.base_url,
             "reconnexion" if is_reconnect else "connexion initiale",
+            ",".join(self.profiles),
+            self.agent_name,
         )
         return True
 
