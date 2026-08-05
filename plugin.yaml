@@ -1,7 +1,7 @@
 name: pulse-chat
 label: Pulse Chat
 kind: platform
-version: 1.0.0
+version: 1.1.0
 description: >
   Adaptateur de plateforme Pulse Chat pour Hermes Agent.
   Relaie les messages entre l'app Pulse Chat (front de conversation client)

@@ -120,6 +120,78 @@ def test_build_capabilities_mcp_liste_blanche_stricte():
     assert "headers" not in dumped
 
 
+def test_build_capabilities_model_objet_avec_secret_ne_fuite_pas():
+    # Cas courant Hermes : `model` stocke comme objet {name, provider, api_key,
+    # base_url} plutot que comme simple chaine. Seul un nom lisible doit
+    # franchir le WS, jamais l'objet (et surtout jamais la cle d'API).
+    class ModelConfig:
+        def __init__(self):
+            self.name = "hermes-4-70b"
+            self.provider = "openai-compatible"
+            self.api_key = "sk-super-secret-model-key"
+            self.base_url = "https://api.example/v1"
+
+    result = build_capabilities(
+        skills=[],
+        disabled=set(),
+        hub_names=set(),
+        bundled_names=set(),
+        usage={},
+        mcp_servers={},
+        config={"model": ModelConfig(), "identity": "Assistant"},
+        hermes_version=None,
+        plugin_version="1.0.0",
+    )
+
+    assert result["model"] == "hermes-4-70b"
+    dumped = repr(result)
+    assert "sk-super-secret-model-key" not in dumped
+    assert "api_key" not in dumped
+    assert "base_url" not in dumped
+
+
+def test_build_capabilities_model_dict_avec_secret_ne_fuite_pas():
+    result = build_capabilities(
+        skills=[],
+        disabled=set(),
+        hub_names=set(),
+        bundled_names=set(),
+        usage={},
+        mcp_servers={},
+        config={
+            "model": {
+                "name": "hermes-4-70b",
+                "provider": "openai-compatible",
+                "api_key": "sk-super-secret-model-key",
+            }
+        },
+        hermes_version=None,
+        plugin_version="1.0.0",
+    )
+
+    assert result["model"] == "hermes-4-70b"
+    dumped = repr(result)
+    assert "sk-super-secret-model-key" not in dumped
+    assert "api_key" not in dumped
+
+
+def test_build_capabilities_model_sans_nom_lisible_retombe_a_none():
+    result = build_capabilities(
+        skills=[],
+        disabled=set(),
+        hub_names=set(),
+        bundled_names=set(),
+        usage={},
+        mcp_servers={},
+        config={"model": {"api_key": "sk-secret"}},
+        hermes_version=None,
+        plugin_version="1.0.0",
+    )
+
+    assert result["model"] is None
+    assert "sk-secret" not in repr(result)
+
+
 def test_build_capabilities_mcp_conf_non_dict_ignoree_sans_lever():
     result = build_capabilities(
         skills=[],
@@ -199,6 +271,49 @@ def test_build_capabilities_description_tronquee_a_200():
     )
 
     assert len(result["skills"][0]["description"]) == 200
+
+
+# ── Bornes de taille (hello = seule voie d'enregistrement du peer) ───────
+
+
+def test_build_capabilities_skills_plafonnees_a_100_les_plus_utilisees():
+    skills = [{"name": f"skill-{i}", "description": ""} for i in range(150)]
+    usage = {f"skill-{i}": 150 - i for i in range(150)}  # skill-0 la plus utilisee
+
+    result = build_capabilities(
+        skills=skills,
+        disabled=set(),
+        hub_names=set(),
+        bundled_names=set(),
+        usage=usage,
+        mcp_servers={},
+        config={},
+        hermes_version=None,
+        plugin_version="1.0.0",
+    )
+
+    assert len(result["skills"]) == 100
+    names = [s["name"] for s in result["skills"]]
+    assert names[0] == "skill-0"
+    assert "skill-149" not in names
+
+
+def test_build_capabilities_mcp_servers_plafonnes_a_100():
+    mcp_servers = {f"server-{i}": {"transport": "sse"} for i in range(150)}
+
+    result = build_capabilities(
+        skills=[],
+        disabled=set(),
+        hub_names=set(),
+        bundled_names=set(),
+        usage={},
+        mcp_servers=mcp_servers,
+        config={},
+        hermes_version=None,
+        plugin_version="1.0.0",
+    )
+
+    assert len(result["mcpServers"]) == 100
 
 
 # ── collect_capabilities : source qui leve => None, jamais d'exception ───

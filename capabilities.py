@@ -6,9 +6,11 @@ La fiche d'un agent dans /admin doit dire ce qu'il sait faire : modele,
 identite, skills, serveurs MCP. Ces donnees vivent cote Hermes, dans des
 symboles PRIVES qui peuvent changer de version en version — toute la recolte
 est donc enveloppee dans un try/except large (``collect_capabilities``) : en
-cas d'echec, le plugin envoie ``capabilities: null`` et journalise un
-avertissement, mais **poursuit sa connexion**. Le chat ne doit jamais tomber
-parce qu'une fiche d'administration est incomplete.
+cas d'echec, le plugin retourne ``None`` et journalise un avertissement, mais
+**poursuit sa connexion** ; la cle ``capabilities`` est alors ABSENTE de la
+trame hello (jamais ``"capabilities": null`` sur le fil, voir ``hello.py``).
+Le chat ne doit jamais tomber parce qu'une fiche d'administration est
+incomplete.
 
 Secret — invariant : seuls le NOM et le TRANSPORT d'un serveur MCP franchissent
 le WS. Les champs ``env``, ``headers``, ``args``, ``url`` et ``command``
@@ -25,12 +27,30 @@ from typing import Any, Dict, List, Optional, Set
 logger = logging.getLogger(__name__)
 
 _DESCRIPTION_MAX_LEN = 200
+_MAX_LIST_LEN = 100
 
 
 def _truncate(value: Optional[str], max_len: int) -> str:
     """Chaine vide si absente ; tronquee sans depasser ``max_len``."""
     text = str(value) if value is not None else ""
     return text[:max_len]
+
+
+def _readable_name(value: Any) -> Optional[str]:
+    """Extrait un nom lisible d'une valeur de config potentiellement porteuse
+    de secrets (ex: ``model`` sous forme d'objet ``{name, provider, api_key,
+    base_url}``). N'accepte QUE des chaines en sortie : jamais l'objet brut,
+    qui pourrait contenir une cle d'API — le filtrage cote serveur intervient
+    trop tard, le secret aurait deja franchi le WS."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        name = value.get("name")
+        return name if isinstance(name, str) else None
+    name = getattr(value, "name", None)
+    return name if isinstance(name, str) else None
 
 
 def _provenance(name: str, hub_names: Set[str], bundled_names: Set[str]) -> str:
@@ -88,6 +108,9 @@ def build_capabilities(
             }
         )
     kept.sort(key=lambda item: (-item["usage"], item["name"]))
+    # Borne de taille : le hello est l'unique voie d'enregistrement du peer, on
+    # garde les plus utilisees (deja triees usage desc puis nom asc ci-dessus).
+    kept = kept[:_MAX_LIST_LEN]
 
     # ── Serveurs MCP : liste blanche stricte (name + transport) ──────────
     mcp_list: List[Dict[str, Any]] = []
@@ -101,10 +124,11 @@ def build_capabilities(
             }
         )
     mcp_list.sort(key=lambda item: item["name"])
+    mcp_list = mcp_list[:_MAX_LIST_LEN]
 
     return {
-        "model": config.get("model"),
-        "identity": config.get("identity"),
+        "model": _readable_name(config.get("model")),
+        "identity": _readable_name(config.get("identity")),
         "hermesVersion": hermes_version,
         "pluginVersion": plugin_version,
         "skills": kept,
