@@ -44,6 +44,7 @@ import uuid
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
+from .capabilities import collect_capabilities
 from .classification import classify_outbound, parse_tool  # noqa: F401  (re-export)
 from .hello import build_hello, parse_profiles
 from .reconnect import is_retryable_ws_error, reconnect_delay
@@ -182,11 +183,26 @@ class PulseChatAdapter(BasePlatformAdapter):
             self._set_fatal_error("connect_failed", str(exc), retryable=retryable)
             return False
 
+        # Capacites de l'agent (fiche /admin) : recolte impure isolee ici — le
+        # module hello.py reste pur. La recolte ne doit JAMAIS empecher le
+        # hello : self.profiles[0] choisi arbitrairement (un bot peut servir
+        # plusieurs profils, la fiche colle au premier), et toute exception
+        # imprevue degrade silencieusement vers "pas de capacites" plutot que
+        # de faire echouer la connexion (la connexion prime toujours sur la
+        # fiche d'administration).
+        capabilities: Optional[Dict[str, Any]] = None
+        try:
+            capabilities = collect_capabilities(self.profiles[0])
+        except Exception as exc:
+            logger.warning("Pulse Chat: collecte des capacites en echec — %s", exc)
+            capabilities = None
+
         # Frame hello AVANT la boucle de reception : le serveur enregistre le
         # peer pour ces profils (last-wins par profil) puis rejoue les messages
         # non livres de ces profils. Reconnexion => re-hello (meme chemin).
         try:
-            await self._ws.send(json.dumps(build_hello(self.profiles, self.agent_name)))
+            hello_frame = build_hello(self.profiles, self.agent_name, capabilities)
+            await self._ws.send(json.dumps(hello_frame))
         except Exception as exc:
             logger.error("Pulse Chat: echec envoi hello — %s", exc)
             try:
