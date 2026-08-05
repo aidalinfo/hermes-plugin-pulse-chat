@@ -218,3 +218,31 @@ def test_collect_capabilities_ne_leve_jamais_sur_profil_quelconque():
     # quel que soit le profil demande.
     result = collect_capabilities("un-profil-quelconque")
     assert result is None
+
+
+# ── Verrou de non-regression sur les symboles Hermes reels ───────────────
+#
+# Ces deux noms ont ete verifies dans NousResearch/hermes-agent (cf. revue
+# fix round 1) : `load_usage` (pas `_read_usage_stats`, qui n'existe pas) et
+# l'abandon de `_profile_scope` (fonction imbriquee, non importable) au
+# profit de `gateway.run._profile_runtime_scope` + repli `nullcontext()`. Un
+# grep source suffit ici : on ne peut pas executer contre un vrai Hermes
+# dans cet environnement, donc ce test empeche seulement une regression
+# silencieuse (retour a un nom fantome) sans pretendre verifier l'API reelle.
+
+
+def test_collect_capabilities_utilise_load_usage_et_pas_un_nom_fantome():
+    source = _MODULE_PATH.read_text(encoding="utf-8")
+    assert "from tools.skill_usage import load_usage" in source
+    assert "_read_usage_stats" not in source
+
+
+def test_collect_capabilities_n_importe_jamais_profile_scope_directement():
+    source = _MODULE_PATH.read_text(encoding="utf-8")
+    # `_profile_scope` est une fonction imbriquee cote Hermes (non
+    # importable) : seul le commentaire explicatif peut mentionner son nom,
+    # aucun `import` ne doit le cibler.
+    assert "import _profile_scope" not in source
+    assert "web_deps" not in source
+    assert "_profile_runtime_scope" in source
+    assert "nullcontext" in source

@@ -18,6 +18,7 @@ stricte (jamais par liste noire).
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any, Dict, List, Optional, Set
 
@@ -125,12 +126,26 @@ def collect_capabilities(profile: str) -> Optional[Dict[str, Any]]:
         _pkg_version = None  # type: ignore[assignment]
 
     try:
-        try:
-            from hermes_cli.web_deps import _profile_scope
-        except ImportError:
-            from hermes_cli import _profile_scope  # type: ignore[attr-defined]
+        # `_profile_scope` n'est PAS importable : c'est une fonction imbriquee
+        # dans `gateway/platforms/api_server.py` (definie dans le corps d'une
+        # autre fonction), et les usages `hermes_cli/web_routers/*.py` passent
+        # par du late-binding interne au serveur web, hors de portee ici.
+        #
+        # A la place : `gateway.run._profile_runtime_scope` si disponible et
+        # qu'un profil est fourni, sinon `nullcontext()` — no-op ASSUME (pas
+        # un oubli) : chaque bot de notre deploiement sert un seul profil via
+        # PULSE_CHAT_PROFILE, donc la configuration chargee dans le process
+        # est deja celle du bon profil ; il n'y a rien a "scoper".
+        scope = contextlib.nullcontext()
+        if profile:
+            try:
+                from gateway.run import _profile_runtime_scope
 
-        with _profile_scope(profile):
+                scope = _profile_runtime_scope(profile)
+            except ImportError:
+                scope = contextlib.nullcontext()
+
+        with scope:
             from tools.skills_tool import _find_all_skills
             from hermes_cli.skills_config import get_disabled_skills
             from tools.skill_usage import (
@@ -152,15 +167,16 @@ def collect_capabilities(profile: str) -> Optional[Dict[str, Any]]:
             bundled_names = set(_read_bundled_manifest_names() or [])
             mcp_servers = _get_mcp_servers() or {}
 
-            # L'usage brut par skill est un detail d'implementation Hermes qui
-            # n'est pas garanti stable — echec isole (pas de fonction/attribut
-            # de recolte disponible) => usage 0 pour chaque skill plutot que
-            # d'abandonner toute la fiche de capacites.
+            # Usage brut par skill : `load_usage()` (tools.skill_usage), employe
+            # exactement comme dans hermes_cli/web_routers/skills.py —
+            # `activity_count(usage.get(nom_skill, {}))`. Isole dans son propre
+            # try/except : un changement de forme ne doit degrader que les
+            # compteurs (a 0), pas faire echouer toute la fiche de capacites.
             raw_usage: Dict[str, Any] = {}
             try:
-                from tools.skill_usage import _read_usage_stats
+                from tools.skill_usage import load_usage
 
-                stats = _read_usage_stats() or {}
+                stats = load_usage() or {}
                 for skill in skills:
                     name = str((skill or {}).get("name") or "")
                     if name:
