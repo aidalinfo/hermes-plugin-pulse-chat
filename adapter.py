@@ -46,6 +46,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .classification import classify_outbound, parse_tool  # noqa: F401  (re-export)
 from .hello import build_hello, parse_profiles
+from .reconnect import is_retryable_ws_error, reconnect_delay
 
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -124,6 +125,10 @@ class PulseChatAdapter(BasePlatformAdapter):
         # Etat runtime
         self._ws = None
         self._recv_task: Optional[asyncio.Task] = None
+        # Reconnexion auto-pilotee (le gateway ne retente qu'une fois — cf.
+        # reconnect.py) : tache de boucle + retryabilite du dernier echec.
+        self._reconnect_task: Optional[asyncio.Task] = None
+        self._last_connect_retryable: bool = True
         self._media_dir: Optional[str] = None
         # Cache borne (FIFO) des derniers message ids traites — dedup du rejeu.
         self._seen_message_ids: "OrderedDict[str, None]" = OrderedDict()
@@ -137,6 +142,7 @@ class PulseChatAdapter(BasePlatformAdapter):
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Ouvre le WebSocket vers l'app et demarre la boucle de reception."""
         if not self.base_url or not self.token:
+            self._last_connect_retryable = False
             self._set_fatal_error(
                 "config_missing",
                 "PULSE_CHAT_URL et PULSE_CHAT_TOKEN doivent etre definis",
@@ -147,6 +153,7 @@ class PulseChatAdapter(BasePlatformAdapter):
         try:
             import websockets
         except ImportError:
+            self._last_connect_retryable = False
             self._set_fatal_error(
                 "missing_dependency",
                 "librairie manquante — pip install websockets",
@@ -169,8 +176,10 @@ class PulseChatAdapter(BasePlatformAdapter):
                 )
             self._ws = await asyncio.wait_for(connection, timeout=_WS_CONNECT_TIMEOUT)
         except Exception as exc:
+            retryable = is_retryable_ws_error(exc)
             logger.error("Pulse Chat: echec de connexion WS a %s — %s", self.base_url, exc)
-            self._set_fatal_error("connect_failed", str(exc), retryable=True)
+            self._last_connect_retryable = retryable
+            self._set_fatal_error("connect_failed", str(exc), retryable=retryable)
             return False
 
         # Frame hello AVANT la boucle de reception : le serveur enregistre le
@@ -185,9 +194,11 @@ class PulseChatAdapter(BasePlatformAdapter):
             except Exception:
                 pass
             self._ws = None
+            self._last_connect_retryable = True
             self._set_fatal_error("connect_failed", str(exc), retryable=True)
             return False
 
+        self._last_connect_retryable = True
         self._recv_task = asyncio.create_task(self._receive_loop())
         self._mark_connected()
         logger.info(
@@ -200,8 +211,18 @@ class PulseChatAdapter(BasePlatformAdapter):
         return True
 
     async def disconnect(self) -> None:
-        """Arret propre : marque deconnecte, annule la boucle, ferme le WS."""
+        """Arret propre : marque deconnecte, annule les boucles, ferme le WS."""
         self._mark_disconnected()
+
+        reconnect_task, self._reconnect_task = self._reconnect_task, None
+        if reconnect_task and not reconnect_task.done():
+            reconnect_task.cancel()
+            try:
+                await reconnect_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
         task, self._recv_task = self._recv_task, None
         ws, self._ws = self._ws, None
@@ -245,15 +266,65 @@ class PulseChatAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.error("Pulse Chat: erreur boucle de reception — %s", exc)
         finally:
-            # Coupure inattendue (pas un disconnect() volontaire) : le gateway
-            # pilote la reconnexion via connect(is_reconnect=True).
+            # Coupure inattendue (pas un disconnect() volontaire) : l'adaptateur
+            # pilote SA reconnexion (backoff, cf. reconnect.py). On ne notifie
+            # PAS le gateway ici : son unique retry immediat tombait sur le 502
+            # de redeploiement et il abandonnait definitivement (incident
+            # 2026-08-05). Le fatal ne remonte qu'a l'abandon (non-retryable).
             if self.is_connected:
-                self._set_fatal_error(
-                    "connection_lost",
-                    "WebSocket Pulse Chat ferme de maniere inattendue",
-                    retryable=True,
+                self._mark_disconnected()
+                logger.warning(
+                    "Pulse Chat: WebSocket ferme de maniere inattendue — "
+                    "reconnexion automatique engagee"
+                )
+                ws, self._ws = self._ws, None
+                if ws is not None:
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                self._ensure_reconnect_task()
+
+    def _ensure_reconnect_task(self) -> None:
+        """Demarre la boucle de reconnexion si elle ne tourne pas deja."""
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        self._reconnect_task = asyncio.create_task(self._reconnect_loop())
+
+    async def _reconnect_loop(self) -> None:
+        """Retente ``connect(is_reconnect=True)`` avec backoff, indefiniment.
+
+        S'arrete : au succes, ou sur un echec non-retryable (token invalide,
+        config) — seul cas ou le fatal est notifie au gateway.
+        """
+        attempt = 0
+        while True:
+            attempt += 1
+            delay = reconnect_delay(attempt)
+            if delay:
+                await asyncio.sleep(delay)
+            logger.warning(
+                "Pulse Chat: tentative de reconnexion %d (delai %.0fs)", attempt, delay
+            )
+            try:
+                if await self.connect(is_reconnect=True):
+                    logger.info(
+                        "Pulse Chat: reconnecte apres %d tentative(s)", attempt
+                    )
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # connect() ne devrait pas lever — ceinture : on traite comme
+                # un echec retryable et on continue le backoff.
+                logger.exception("Pulse Chat: erreur inattendue pendant la reconnexion")
+                continue
+            if not self._last_connect_retryable:
+                logger.error(
+                    "Pulse Chat: echec de reconnexion non-retryable — abandon"
                 )
                 await self._notify_fatal_error()
+                return
 
     async def _handle_message_created(self, data: Dict[str, Any]) -> None:
         """``message.created`` -> MessageEvent -> handle_message -> ack."""
