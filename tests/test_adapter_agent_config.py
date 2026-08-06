@@ -188,8 +188,13 @@ def test_frame_without_agent_config_sets_no_metadata():
     assert not hasattr(event, "metadata")
 
 
-def test_message_event_without_metadata_kwarg_still_carries_block():
-    """MessageEvent d'une version d'Hermes sans champ `metadata` : repli attribut."""
+def test_message_event_without_metadata_kwarg_still_carries_block(caplog):
+    """MessageEvent d'une version d'Hermes sans champ `metadata` : repli attribut.
+
+    Le repli doit LAISSER UNE TRACE : sans elle, la configuration voyagerait sur
+    un attribut qu'Hermes ne lit pas, sans que personne ne le sache.
+    """
+    adapter_module._WARNED_ONCE.clear()
 
     class LegacyMessageEvent:
         def __init__(self, text, message_type, source, message_id, media_urls, media_types):
@@ -209,6 +214,32 @@ def test_message_event_without_metadata_kwarg_still_carries_block():
         {"agentConfig": AGENT_CONFIG},
     )
     assert event.metadata == {"agentConfig": AGENT_CONFIG}
+    assert any("metadata" in r.message for r in caplog.records if r.levelname == "WARNING")
+
+
+def test_metadata_fallback_warns_only_once(caplog):
+    """Une degradation structurelle se repete a chaque message : une trace suffit."""
+
+    class LegacyMessageEvent:
+        def __init__(self, text, message_type, source, message_id, media_urls, media_types):
+            self.message_id = message_id
+
+    adapter_module._WARNED_ONCE.clear()
+    kwargs = {
+        "text": "bonjour",
+        "message_type": "text",
+        "source": {},
+        "message_id": "msg-1",
+        "media_urls": [],
+        "media_types": [],
+    }
+    for _ in range(3):
+        adapter_module.build_message_event(
+            LegacyMessageEvent, dict(kwargs), {"agentConfig": AGENT_CONFIG}
+        )
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1, "un seul avertissement attendu pour trois messages"
 
 
 def test_message_is_never_lost_when_block_cannot_be_attached():

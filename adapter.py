@@ -82,6 +82,18 @@ def _get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
     return value if value is not None else default
 
 
+# Avertissements deja emis (cles arbitraires) : une degradation structurelle se
+# repete a CHAQUE message, la signaler une fois suffit et evite d'inonder les logs.
+_WARNED_ONCE: set = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    if key in _WARNED_ONCE:
+        return
+    _WARNED_ONCE.add(key)
+    logger.warning("%s", message)
+
+
 def agent_config_metadata(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Bloc ``agentConfig`` de la frame, repris TEL QUEL (fonction pure).
 
@@ -109,12 +121,24 @@ def build_message_event(factory, kwargs: Dict[str, Any], metadata: Optional[Dict
     toutes les versions d'Hermes (c'est une API interne — cf. 08-hermes-plugin).
     On tente donc le mot-cle, puis on retombe sur l'attribut ; en dernier
     recours l'evenement part sans son bloc plutot que de perdre le message.
+
+    Le repli est JOURNALISE (une seule fois, pour ne pas noyer les logs) : sur un
+    Hermes qui ne connait pas ce champ, la configuration voyagerait sur un
+    attribut que personne ne lit — exactement la panne silencieuse qu'on vient de
+    corriger, sous une autre forme. Sans cette trace, rien ne la signalerait.
     """
     if metadata is None:
         return factory(**kwargs)
     try:
         return factory(metadata=metadata, **kwargs)
     except TypeError:
+        _warn_once(
+            "metadata_kwarg",
+            "Pulse Chat: MessageEvent n'accepte pas 'metadata' — agentConfig "
+            "transporte en attribut ; verifier qu'Hermes le lit bien, sinon la "
+            "configuration de l'agent (ton, autonomie, consignes, outils) reste "
+            "sans effet.",
+        )
         event = factory(**kwargs)
         try:
             setattr(event, "metadata", metadata)
