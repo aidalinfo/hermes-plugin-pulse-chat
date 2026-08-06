@@ -9,6 +9,8 @@ tomber le tour de parole de l'agent.
 
 import asyncio
 
+import pytest
+
 from test_adapter_dedup import _load_adapter_module
 
 adapter_module = _load_adapter_module()
@@ -18,15 +20,24 @@ class _Config:
     extra = {"url": "http://pulse-chat.test", "token": "token-test"}
 
 
-def _make_adapter(post_ok=True):
+def _make_adapter(post_ok=True, vault_ok=True):
     adapter = adapter_module.PulseChatAdapter(_Config())
     posted = []
+    # `publish_artifact(content=…)` ECRIT dans le coffre avant de publier :
+    # sans ce double, il ne pourrait pas aboutir.
+    written = []
 
     async def fake_post(payload, hermes_id):
         posted.append(payload)
         return adapter_module.SendResult(success=post_ok, message_id=hermes_id)
 
+    def fake_vault(method, url, body=None, content_type=None):
+        written.append({"method": method, "url": url, "body": body})
+        return None if not vault_ok else b"{}"
+
     adapter._post_agent_message = fake_post
+    adapter._vault_request = fake_vault
+    adapter.written = written
     return adapter, posted
 
 
@@ -54,6 +65,47 @@ def test_publish_artifact_poste_le_bon_payload():
         assert posted[0]["artifactKind"] == "mermaid"
         assert posted[0]["artifactId"] == artifact_id
         assert posted[0]["title"] == "Archi"
+        # Le contenu NE transite PAS : le payload porte un pointeur.
+        assert "content" not in posted[0]
+        assert posted[0]["path"].startswith("artifacts/")
+        # Et il a bien ete ecrit dans le coffre AVANT la publication.
+        assert adapter.written[0]["method"] == "PUT"
+        assert adapter.written[0]["body"] == b"graph TD; A-->B;"
+
+    asyncio.run(run())
+
+
+def test_publish_artifact_par_chemin_n_ecrit_rien():
+    async def run():
+        adapter, posted = _make_adapter()
+        got = await adapter.publish_artifact(
+            chat_id="demo", kind="markdown", path="rapports/mars.md", title="Mars"
+        )
+        assert got is not None
+        assert posted[0]["path"] == "rapports/mars.md"
+        # Le fichier existe deja : aucune ecriture.
+        assert adapter.written == []
+
+    asyncio.run(run())
+
+
+def test_publish_artifact_refuse_les_deux_ou_aucun():
+    async def run():
+        adapter, _ = _make_adapter()
+        with pytest.raises(ValueError):
+            await adapter.publish_artifact("demo", "markdown", content="x", path="a.md")
+        with pytest.raises(ValueError):
+            await adapter.publish_artifact("demo", "markdown")
+
+    asyncio.run(run())
+
+
+def test_publish_artifact_echoue_si_le_coffre_refuse():
+    async def run():
+        adapter, posted = _make_adapter(vault_ok=False)
+        assert await adapter.publish_artifact("demo", "markdown", "x", title="T") is None
+        # Rien n'est publie : une carte sans fichier serait un pointeur mort.
+        assert posted == []
 
     asyncio.run(run())
 
@@ -64,7 +116,10 @@ def test_publish_artifact_reutilise_l_id_pour_versionner():
         first = await adapter.publish_artifact("demo", "markdown", "v1", artifact_id="doc")
         second = await adapter.publish_artifact("demo", "markdown", "v2", artifact_id="doc")
         assert first == second == "doc"
-        assert [p["content"] for p in posted] == ["v1", "v2"]
+        # Même id ⇒ même pointeur : le fichier de coffre est réécrit, et c'est
+        # la republication qui signale la mise à jour.
+        assert posted[0]["path"] == posted[1]["path"]
+        assert [w["body"] for w in adapter.written] == [b"v1", b"v2"]
 
     asyncio.run(run())
 

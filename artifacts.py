@@ -70,25 +70,23 @@ def build_artifact_payload(
     channel_slug: str,
     artifact_id: str,
     kind: str,
-    content: str,
+    path: str,
     title: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Construit le POST sortant. PURE — aucune I/O.
 
-    Leve ``ValueError`` sur un type inconnu ou un contenu hors bornes : mieux
-    vaut echouer ici, cote agent, qu'obtenir un 400 opaque apres un aller-retour.
+    ``path`` designe un fichier DEJA ECRIT dans le coffre du canal : le
+    contenu ne transite pas ici, il n'existe qu'une fois, dans S3.
+
+    Leve ``ValueError`` sur un type inconnu ou un chemin vide : mieux vaut
+    echouer ici, cote agent, qu'obtenir un 400 opaque apres un aller-retour.
     """
     if not is_artifact_kind(kind):
         raise ValueError(
             "type d'artifact inconnu: %r (attendu: %s)" % (kind, ", ".join(ARTIFACT_KINDS))
         )
-    if not isinstance(content, str) or not content:
-        raise ValueError("contenu d'artifact vide")
-    if len(content) > MAX_ARTIFACT_CONTENT_LENGTH:
-        raise ValueError(
-            "contenu d'artifact trop volumineux (%d > %d)"
-            % (len(content), MAX_ARTIFACT_CONTENT_LENGTH)
-        )
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("chemin d'artifact vide")
     if not artifact_id:
         raise ValueError("artifactId requis")
 
@@ -98,5 +96,35 @@ def build_artifact_payload(
         "artifactId": artifact_id,
         "artifactKind": kind,
         "title": normalize_title(title),
-        "content": content,
+        "path": path,
     }
+
+
+#: Extension de fichier conseillee par type — sert au chemin par defaut.
+ARTIFACT_EXTENSIONS = {
+    "mermaid": "mmd",
+    "markdown": "md",
+    "svg": "svg",
+    "html": "html",
+    "drawio": "drawio",
+}
+
+
+def default_artifact_path(kind: str, title: Any, artifact_id: str) -> str:
+    """Chemin de coffre par defaut d'un artifact publie.
+
+    Range les artifacts sous ``artifacts/`` pour qu'ils ne se melent pas aux
+    fichiers de travail de l'agent, et derive le nom du titre — un humain qui
+    parcourt le coffre doit reconnaitre ce qu'il voit. Sans titre, l'id sert
+    de nom (il est stable, donc republier ecrase le meme fichier).
+    """
+    ext = ARTIFACT_EXTENSIONS.get(kind, "txt")
+    normalized = normalize_title(title)
+    if normalized:
+        slug = "".join(
+            char if char.isalnum() or char in "-_" else "-" for char in normalized.lower()
+        )
+        slug = "-".join(part for part in slug.split("-") if part)[:80]
+    else:
+        slug = ""
+    return "artifacts/%s.%s" % (slug or artifact_id, ext)

@@ -45,11 +45,16 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 from .approvals import build_approval_payload, parse_approval_reply, refusal
-from .artifacts import build_artifact_payload, default_artifact_id
+from .artifacts import (
+    build_artifact_payload,
+    default_artifact_id,
+    default_artifact_path,
+)
 from .capabilities import collect_capabilities
 from .vault import vault_url
 from .classification import classify_outbound, parse_tool  # noqa: F401  (re-export)
 from .hello import build_hello, parse_profiles
+from .metrics import extract_metrics
 from .reconnect import is_retryable_ws_error, reconnect_delay
 
 from gateway.platforms.base import (
@@ -559,6 +564,11 @@ class PulseChatAdapter(BasePlatformAdapter):
             "phase": (info["phase"] or "interim") if kind == "tool_event" else None,
             "replyToHermesId": str(reply_to) if reply_to else None,
         }
+        # Metriques d'execution (modele, tokens, duree) si Hermes les expose —
+        # l'app ne peut pas les deviner. Champ omis quand il n'y a rien.
+        metrics = extract_metrics(metadata)
+        if metrics is not None:
+            payload["metrics"] = metrics
         return await self._post_agent_message(payload, hermes_id)
 
     async def edit_message(
@@ -594,33 +604,56 @@ class PulseChatAdapter(BasePlatformAdapter):
         self,
         chat_id: str,
         kind: str,
-        content: str,
+        content: Optional[str] = None,
         artifact_id: Optional[str] = None,
         title: Optional[str] = None,
+        path: Optional[str] = None,
     ) -> Optional[str]:
         """Publie un artifact dans la conversation.
 
         ``kind`` : mermaid | markdown | svg | html | drawio.
 
-        L'``artifact_id`` porte l'IDENTITE de l'artifact : le republier met a
-        jour la carte existante (v2, v3...) au lieu d'en ajouter une. Par
-        defaut il est derive du TITRE, ce qui rend le comportement attendu
-        automatique — republier « Architecture reseau » versionne la meme
-        carte, sans que l'agent ait a gerer d'identifiant. Sans titre ni id
-        explicite, chaque publication cree sa propre carte.
+        Un artifact est un POINTEUR vers un fichier du coffre : le contenu
+        n'existe qu'une fois, dans le coffre du canal. Deux usages :
 
-        Retourne l'``artifact_id`` utilise, ou ``None`` si le POST a echoue.
+        - ``content=`` : le contenu est ECRIT dans le coffre puis publie, en un
+          seul appel. C'est le cas courant — l'agent a son contenu en memoire,
+          lui demander deux appels serait un piege d'ergonomie.
+        - ``path=``    : le fichier est deja dans le coffre, on le designe.
+
+        L'``artifact_id`` porte l'IDENTITE : le republier met a jour la carte
+        existante au lieu d'en ajouter une. Par defaut il est derive du TITRE,
+        ce qui rend le comportement attendu automatique.
+
+        Retourne l'``artifact_id`` utilise, ou ``None`` en cas d'echec.
         """
+        if (content is None) == (path is None):
+            raise ValueError("fournir soit `content`, soit `path` — jamais les deux")
+
         artifact_id = (
             artifact_id
             or default_artifact_id(kind, title)
             or "art-%s" % uuid.uuid4().hex
         )
+
+        if content is not None:
+            path = path or default_artifact_path(kind, title, artifact_id)
+            written = await self.vault_write(
+                chat_id, path, content.encode("utf-8"), "text/plain; charset=utf-8"
+            )
+            if not written:
+                logger.warning(
+                    "Pulse Chat: artifact %s — ecriture du coffre en echec (%s)",
+                    artifact_id,
+                    path,
+                )
+                return None
+
         payload = build_artifact_payload(
             channel_slug=chat_id,
             artifact_id=artifact_id,
             kind=kind,
-            content=content,
+            path=path,
             title=title,
         )
         result = await self._post_agent_message(payload, artifact_id)

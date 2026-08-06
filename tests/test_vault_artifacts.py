@@ -44,7 +44,7 @@ class TestArtifactPayload:
             channel_slug="demo",
             artifact_id="art-1",
             kind="mermaid",
-            content="graph TD; A-->B;",
+            path="artifacts/archi.mmd",
             title="  Archi   réseau  ",
         )
         assert payload == {
@@ -53,8 +53,14 @@ class TestArtifactPayload:
             "artifactId": "art-1",
             "artifactKind": "mermaid",
             "title": "Archi réseau",
-            "content": "graph TD; A-->B;",
+            "path": "artifacts/archi.mmd",
         }
+
+    def test_le_contenu_ne_transite_jamais(self):
+        # Source unique de vérité : le contenu vit dans le coffre, le payload
+        # ne porte qu'un pointeur.
+        payload = artifacts.build_artifact_payload("demo", "a", "html", "artifacts/x.html")
+        assert "content" not in payload
 
     def test_titre_vide_devient_none(self):
         payload = artifacts.build_artifact_payload("demo", "a", "markdown", "# Titre", "   ")
@@ -68,13 +74,24 @@ class TestArtifactPayload:
         with pytest.raises(ValueError):
             artifacts.build_artifact_payload("demo", "a", "powerpoint", "x")
 
-    def test_refuse_un_contenu_vide_ou_trop_gros(self):
-        with pytest.raises(ValueError):
-            artifacts.build_artifact_payload("demo", "a", "html", "")
-        with pytest.raises(ValueError):
-            artifacts.build_artifact_payload(
-                "demo", "a", "html", "x" * (artifacts.MAX_ARTIFACT_CONTENT_LENGTH + 1)
-            )
+    def test_refuse_un_chemin_vide(self):
+        for bad in ("", "   ", None):
+            with pytest.raises(ValueError):
+                artifacts.build_artifact_payload("demo", "a", "html", bad)
+
+    def test_chemin_par_defaut_derive_du_titre(self):
+        # Un humain qui parcourt le coffre doit reconnaître ce qu'il voit.
+        # Les accents sont CONSERVÉS (isalnum les accepte) : S3 gère l'UTF-8 et
+        # un nom lisible vaut mieux qu'un nom translittéré.
+        assert (
+            artifacts.default_artifact_path("mermaid", "Archi réseau", "art-1")
+            == 'artifacts/archi-réseau.mmd'
+        )
+        assert artifacts.default_artifact_path("markdown", None, "art-9") == 'artifacts/art-9.md'
+        # Republier le même titre vise le MÊME fichier.
+        assert artifacts.default_artifact_path("html", "Bilan", "x") == artifacts.default_artifact_path(
+            "html", "  bilan  ", "y"
+        )
 
     def test_exige_un_artifact_id(self):
         with pytest.raises(ValueError):
