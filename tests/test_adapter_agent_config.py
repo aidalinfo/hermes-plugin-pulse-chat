@@ -63,10 +63,16 @@ def _install_gateway_stubs() -> None:
         TEXT = "text"
 
     class SendResult:
+        # Tous les champs sont conserves : les stubs gateway sont partages par
+        # TOUTE la session pytest (premier module charge = stub gagnant), donc
+        # un double incomplet ici casse les tests des autres fichiers.
         def __init__(self, success=False, message_id=None, error=None,
                      retryable=False, error_kind=None):
             self.success = success
             self.message_id = message_id
+            self.error = error
+            self.retryable = retryable
+            self.error_kind = error_kind
 
     base.BasePlatformAdapter = BasePlatformAdapter
     base.MessageEvent = MessageEvent
