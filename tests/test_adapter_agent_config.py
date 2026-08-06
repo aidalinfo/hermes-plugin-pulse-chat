@@ -63,10 +63,16 @@ def _install_gateway_stubs() -> None:
         TEXT = "text"
 
     class SendResult:
+        # TOUS les champs sont conserves : les stubs `gateway.*` sont installes
+        # une seule fois pour la session (premier fichier de test charge gagne),
+        # donc un stub tronque ici casserait les autres fichiers de test.
         def __init__(self, success=False, message_id=None, error=None,
                      retryable=False, error_kind=None):
             self.success = success
             self.message_id = message_id
+            self.error = error
+            self.retryable = retryable
+            self.error_kind = error_kind
 
     base.BasePlatformAdapter = BasePlatformAdapter
     base.MessageEvent = MessageEvent
