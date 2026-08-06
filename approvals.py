@@ -94,6 +94,9 @@ def parse_approval_reply(frame: Any) -> Optional[Dict[str, Any]]:
         "requestId": request_id,
         "decision": decision,
         "granted": decision != "deny",
+        # Meme forme que `refusal()` : l'appelant n'a jamais a distinguer les
+        # deux chemins, seul `granted` compte.
+        "status": "decided",
         "decidedBy": {
             "userId": decided_by.get("userId") or "",
             "userName": decided_by.get("userName") or "",
@@ -106,3 +109,32 @@ def parse_approval_reply(frame: Any) -> Optional[Dict[str, Any]]:
 def is_granting(decision: Optional[str]) -> bool:
     """``deny`` est le seul refus ; l'absence de decision n'accorde rien."""
     return bool(decision) and decision != "deny"
+
+
+#: Issues possibles d'une demande, dans le champ ``status`` de la reponse.
+#:   decided    — un humain a tranche (``granted`` dit dans quel sens)
+#:   timeout    — personne n'a tranche dans le delai
+#:   not_sent   — la demande n'a meme pas pu etre postee
+APPROVAL_STATUSES = ("decided", "timeout", "not_sent")
+
+
+def refusal(request_id: str, status: str) -> Dict[str, Any]:
+    """Reponse de repli, TOUJOURS refusante.
+
+    Pourquoi ce helper plutot qu'un ``None`` : un appelant qui ecrit
+    ``if result:`` sur un ``None`` obtient bien un faux, mais
+    ``result.get("granted")`` leve un ``AttributeError`` et rien n'empeche
+    d'ecrire ``if result is not False:``, qui autorise tout. En
+    renvoyant toujours la meme forme avec ``granted=False``, l'echec ne peut
+    plus etre confondu avec une autorisation, quelle que soit la maniere de
+    tester.
+    """
+    return {
+        "requestId": request_id,
+        "decision": None,
+        "granted": False,
+        "status": status if status in APPROVAL_STATUSES else "not_sent",
+        "decidedBy": {"userId": "", "userName": ""},
+        "decidedAt": None,
+        "channelSlug": None,
+    }

@@ -17,6 +17,7 @@ qu'une nouvelle carte : c'est ainsi que l'agent itere sur un diagramme sans
 polluer le fil.
 """
 
+import hashlib
 from typing import Any, Dict, Optional
 
 #: Types reconnus par l'app.
@@ -39,6 +40,30 @@ def normalize_title(raw: Any) -> Optional[str]:
     if not cleaned:
         return None
     return cleaned[:MAX_ARTIFACT_TITLE_LENGTH]
+
+
+def default_artifact_id(kind: str, title: Any) -> Optional[str]:
+    """Identifiant STABLE derive du (type, titre) — ou ``None`` sans titre.
+
+    C'est le correctif d'un piege d'ergonomie : avec un id aleatoire par
+    defaut, un agent qui republie « le meme » diagramme sans penser a fournir
+    un id creait une carte par iteration et noyait le fil. En derivant l'id du
+    titre, le comportement par defaut devient celui qu'on attend — republier
+    « Architecture reseau » met a jour la carte existante en v2, v3...
+
+    Sans titre, l'artifact n'a aucune identite stable : on renvoie ``None`` et
+    l'appelant genere un id unique (une carte par publication, seule lecture
+    sensible dans ce cas).
+
+    Le canal n'entre pas dans le calcul : la cle d'unicite cote app est
+    (canal, artifactId), deux canaux ne peuvent donc pas se collisionner.
+    """
+    normalized = normalize_title(title)
+    if not normalized:
+        return None
+    seed = "%s|%s" % (kind, normalized.casefold())
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+    return "art-%s-%s" % (kind, digest)
 
 
 def build_artifact_payload(

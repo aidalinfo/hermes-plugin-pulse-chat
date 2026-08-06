@@ -101,25 +101,52 @@ def test_deny_est_transmis_sans_granted():
     asyncio.run(run())
 
 
-def test_timeout_ne_vaut_pas_autorisation():
+def test_timeout_refuse_explicitement():
     async def run():
         adapter, _ = _make_adapter()
         result = await adapter.request_approval(
             chat_id="demo", tool="sh", command="ls", timeout=0.01
         )
-        # None : l'appelant DOIT le traiter comme un refus.
-        assert result is None
+        # Jamais None : un echec ne doit pas pouvoir ressembler a une autorisation.
+        assert result["granted"] is False
+        assert result["status"] == "timeout"
+        assert result["decision"] is None
         assert adapter._pending_approvals == {}
 
     asyncio.run(run())
 
 
-def test_post_en_echec_ne_bloque_pas():
+def test_post_en_echec_refuse_explicitement():
     async def run():
         adapter, _ = _make_adapter(post_ok=False)
         result = await adapter.request_approval(chat_id="demo", tool="sh", command="ls")
-        assert result is None
+        assert result["granted"] is False
+        assert result["status"] == "not_sent"
         assert adapter._pending_approvals == {}
+
+    asyncio.run(run())
+
+
+def test_toutes_les_issues_ont_la_meme_forme():
+    """L'appelant ne doit jamais avoir a distinguer les chemins."""
+
+    async def run():
+        adapter, posted = _make_adapter()
+        task = asyncio.create_task(
+            adapter.request_approval(chat_id="demo", tool="sh", command="ls")
+        )
+        await _settle()
+        adapter._handle_approval_reply(_reply_frame(posted[0]["requestId"]))
+        accorde = await asyncio.wait_for(task, timeout=1)
+
+        refuse = await adapter.request_approval(
+            chat_id="demo", tool="sh", command="ls", timeout=0.01
+        )
+
+        assert set(accorde) == set(refuse)
+        for issue in (accorde, refuse):
+            assert isinstance(issue["granted"], bool)
+            assert issue["status"] in ("decided", "timeout", "not_sent")
 
     asyncio.run(run())
 

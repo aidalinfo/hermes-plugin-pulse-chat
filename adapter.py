@@ -44,8 +44,8 @@ import uuid
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
-from .approvals import build_approval_payload, parse_approval_reply
-from .artifacts import build_artifact_payload
+from .approvals import build_approval_payload, parse_approval_reply, refusal
+from .artifacts import build_artifact_payload, default_artifact_id
 from .capabilities import collect_capabilities
 from .vault import vault_url
 from .classification import classify_outbound, parse_tool  # noqa: F401  (re-export)
@@ -601,13 +601,21 @@ class PulseChatAdapter(BasePlatformAdapter):
         """Publie un artifact dans la conversation.
 
         ``kind`` : mermaid | markdown | svg | html | drawio.
-        Reutiliser le meme ``artifact_id`` publie une NOUVELLE VERSION de
-        l'artifact existant (la carte du fil est mise a jour en place) plutot
-        que d'ajouter une carte.
+
+        L'``artifact_id`` porte l'IDENTITE de l'artifact : le republier met a
+        jour la carte existante (v2, v3...) au lieu d'en ajouter une. Par
+        defaut il est derive du TITRE, ce qui rend le comportement attendu
+        automatique — republier « Architecture reseau » versionne la meme
+        carte, sans que l'agent ait a gerer d'identifiant. Sans titre ni id
+        explicite, chaque publication cree sa propre carte.
 
         Retourne l'``artifact_id`` utilise, ou ``None`` si le POST a echoue.
         """
-        artifact_id = artifact_id or "art-%s" % uuid.uuid4().hex
+        artifact_id = (
+            artifact_id
+            or default_artifact_id(kind, title)
+            or "art-%s" % uuid.uuid4().hex
+        )
         payload = build_artifact_payload(
             channel_slug=chat_id,
             artifact_id=artifact_id,
@@ -710,16 +718,15 @@ class PulseChatAdapter(BasePlatformAdapter):
         options: Optional[List[str]] = None,
         timeout: Optional[float] = None,
         request_id: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """Soumet une action sensible a l'approbation humaine et ATTEND la reponse.
 
-        Retourne le dict decrit par ``parse_approval_reply`` (dont
-        ``granted``), ou ``None`` si la demande n'a pas pu etre postee ou si
-        ``timeout`` expire.
-
-        ⚠️ ``None`` n'est PAS une autorisation : l'appelant doit le traiter
-        comme un refus. C'est deliberement a lui de trancher — l'adaptateur
-        transporte, il ne decide pas.
+        Retourne TOUJOURS un dict de la meme forme, avec un booleen
+        ``granted`` : ``True`` seulement si un humain a explicitement
+        autorise. Un echec de POST ou un ``timeout`` donne
+        ``granted=False`` (et ``status`` vaut alors ``not_sent`` ou
+        ``timeout``) — il n'y a aucun chemin par lequel un incident technique
+        puisse ressembler a une autorisation.
 
         L'attente survit a une coupure du WebSocket : la decision prise
         pendant la coupure est rejouee par l'app a la reconnexion (hello).
@@ -743,19 +750,19 @@ class PulseChatAdapter(BasePlatformAdapter):
                 logger.warning(
                     "Pulse Chat: demande d'approbation non postee (%s) — %s",
                     request_id,
-                    result.error,
+                    getattr(result, "error", None),
                 )
-                return None
+                return refusal(request_id, "not_sent")
             if timeout is None:
                 return await future
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(
-                "Pulse Chat: aucune reponse d'approbation pour %s en %ss",
+                "Pulse Chat: aucune reponse d'approbation pour %s en %ss — refus",
                 request_id,
                 timeout,
             )
-            return None
+            return refusal(request_id, "timeout")
         finally:
             self._pending_approvals.pop(request_id, None)
 

@@ -35,6 +35,7 @@ def _load(module_name):
 
 artifacts = _load("artifacts")
 vault = _load("vault")
+approvals_mod = _load("approvals")
 
 
 class TestArtifactPayload:
@@ -83,6 +84,58 @@ class TestArtifactPayload:
         for kind in artifacts.ARTIFACT_KINDS:
             payload = artifacts.build_artifact_payload("demo", "a", kind, "contenu")
             assert payload["artifactKind"] == kind
+
+
+class TestDefaultArtifactId:
+    def test_stable_pour_un_meme_titre(self):
+        a = artifacts.default_artifact_id("mermaid", "Architecture reseau")
+        b = artifacts.default_artifact_id("mermaid", "Architecture reseau")
+        assert a == b and a.startswith("art-mermaid-")
+
+    def test_insensible_a_la_casse_et_aux_espaces(self):
+        a = artifacts.default_artifact_id("markdown", "  Mon  Doc ")
+        b = artifacts.default_artifact_id("markdown", "mon doc")
+        assert a == b
+
+    def test_distingue_titres_et_types(self):
+        assert artifacts.default_artifact_id("mermaid", "A") != artifacts.default_artifact_id(
+            "mermaid", "B"
+        )
+        assert artifacts.default_artifact_id("mermaid", "A") != artifacts.default_artifact_id(
+            "markdown", "A"
+        )
+
+    def test_none_sans_titre(self):
+        # Pas de titre = pas d'identite stable : l'appelant genere un id unique.
+        for empty in (None, "", "   ", 42):
+            assert artifacts.default_artifact_id("html", empty) is None
+
+
+class TestRefusal:
+    def test_toujours_refusant(self):
+        r = approvals_mod.refusal("req-1", "timeout")
+        assert r["granted"] is False
+        assert r["decision"] is None
+        assert r["status"] == "timeout"
+
+    def test_statut_inconnu_retombe_sur_not_sent(self):
+        assert approvals_mod.refusal("req-1", "n'importe quoi")["status"] == "not_sent"
+
+    def test_meme_forme_qu_une_decision_reelle(self):
+        decided = approvals_mod.parse_approval_reply(
+            {
+                "type": "approval.reply",
+                "channel": {"slug": "demo"},
+                "approval": {
+                    "requestId": "req-1",
+                    "decision": "once",
+                    "decidedBy": {"userId": "u", "userName": "n"},
+                    "decidedAt": "2026-08-06T08:00:00.000Z",
+                },
+            }
+        )
+        assert set(decided) == set(approvals_mod.refusal("req-1", "timeout"))
+        assert decided["status"] == "decided"
 
 
 class TestNormalizeVaultPath:

@@ -77,6 +77,66 @@ def test_publish_artifact_renvoie_none_si_le_post_echoue():
     asyncio.run(run())
 
 
+def test_meme_titre_versionne_la_meme_carte_sans_id_explicite():
+    """Le piege corrige : un id aleatoire par defaut noyait le fil."""
+
+    async def run():
+        adapter, posted = _make_adapter()
+        first = await adapter.publish_artifact(
+            "demo", "mermaid", "graph TD; A-->B;", title="Architecture reseau"
+        )
+        second = await adapter.publish_artifact(
+            "demo", "mermaid", "graph TD; A-->C;", title="Architecture reseau"
+        )
+        assert first == second
+        assert posted[0]["artifactId"] == posted[1]["artifactId"]
+
+    asyncio.run(run())
+
+
+def test_le_titre_est_normalise_avant_derivation():
+    async def run():
+        adapter, _ = _make_adapter()
+        a = await adapter.publish_artifact("demo", "markdown", "x", title="  Mon  Doc ")
+        b = await adapter.publish_artifact("demo", "markdown", "y", title="mon doc")
+        assert a == b
+
+    asyncio.run(run())
+
+
+def test_titres_ou_types_differents_donnent_des_cartes_distinctes():
+    async def run():
+        adapter, _ = _make_adapter()
+        a = await adapter.publish_artifact("demo", "mermaid", "x", title="Archi")
+        b = await adapter.publish_artifact("demo", "mermaid", "x", title="Reseau")
+        c = await adapter.publish_artifact("demo", "markdown", "x", title="Archi")
+        assert len({a, b, c}) == 3
+
+    asyncio.run(run())
+
+
+def test_sans_titre_chaque_publication_a_sa_carte():
+    async def run():
+        adapter, _ = _make_adapter()
+        a = await adapter.publish_artifact("demo", "html", "<p>1</p>")
+        b = await adapter.publish_artifact("demo", "html", "<p>2</p>")
+        # Sans titre, aucune identite stable : une carte par publication.
+        assert a != b
+
+    asyncio.run(run())
+
+
+def test_un_id_explicite_prime_sur_le_titre():
+    async def run():
+        adapter, _ = _make_adapter()
+        got = await adapter.publish_artifact(
+            "demo", "mermaid", "x", artifact_id="mon-id", title="Archi"
+        )
+        assert got == "mon-id"
+
+    asyncio.run(run())
+
+
 def test_vault_list_parse_la_reponse():
     async def run():
         adapter, _ = _make_adapter()
