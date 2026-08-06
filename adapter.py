@@ -75,6 +75,13 @@ _MEDIA_MAX_COUNT = 10
 # Dedup du rejeu serveur : cache borne des derniers message ids traites (un
 # ``message.created`` deja vu est re-acke mais PAS re-dispatche a l'agent).
 _DEDUP_MAX_IDS = 500
+# Identite de l'emetteur : le serveur repond au ``hello`` par une trame
+# ``hello.ack`` portant un jeton OPAQUE lie a cette connexion. Le plugin le
+# memorise et le REJOINT a ses appels sortants (en-tete HTTP ci-dessous + champ
+# ``sessionToken`` de l'ack WS). Il ne le lit pas, n'en derive rien et n'arbitre
+# jamais « ce message m'est-il destine » : il transporte.
+_HELLO_ACK_TYPE = "hello.ack"
+_SESSION_HEADER = "x-hermes-session"
 
 
 def _get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -120,6 +127,22 @@ def agent_config_metadata(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(block, dict):
         return None
     return {"agentConfig": block}
+
+
+def session_token_from_ack(data: Dict[str, Any]) -> Optional[str]:
+    """Jeton de session porte par une trame ``hello.ack`` (fonction pure).
+
+    Renvoie ``None`` des que la trame ne porte pas de jeton exploitable (cle
+    absente, vide, blancs, type inattendu) : le plugin repart alors sans
+    identite, exactement comme face a un serveur anterieur a ce contrat. Aucune
+    interpretation du contenu — c'est une chaine opaque, transportee telle
+    quelle.
+    """
+    token = data.get("sessionToken")
+    if not isinstance(token, str):
+        return None
+    token = token.strip()
+    return token or None
 
 
 def build_message_event(factory, kwargs: Dict[str, Any], metadata: Optional[Dict[str, Any]]):
@@ -197,6 +220,11 @@ class PulseChatAdapter(BasePlatformAdapter):
             self.channels = {str(c).strip() for c in (channels or []) if str(c).strip()}
 
         # Etat runtime
+        # Jeton de session recu dans ``hello.ack`` (identite de l'emetteur).
+        # ``None`` tant qu'aucun ack n'est arrive : le plugin fonctionne alors
+        # a l'identique, sans en-tete de session (serveur anterieur, ou trame
+        # perdue) — la compatibilite prime.
+        self._session_token: Optional[str] = None
         self._ws = None
         self._recv_task: Optional[asyncio.Task] = None
         # Reconnexion auto-pilotee (le gateway ne retente qu'une fois — cf.
@@ -214,6 +242,54 @@ class PulseChatAdapter(BasePlatformAdapter):
     @property
     def name(self) -> str:
         return "Pulse Chat"
+
+    # ── Identite de session (hello.ack) ──────────────────────────────────
+
+    @property
+    def session_token(self) -> Optional[str]:
+        """Jeton de la session courante, ou ``None`` si l'app n'en emet pas."""
+        return self._session_token
+
+    def _forget_session_token(self) -> None:
+        """Oublie le jeton courant (envoi d'un nouveau ``hello``).
+
+        Un nouveau ``hello`` revoque le jeton precedent cote serveur : le garder
+        reviendrait a presenter une identite morte le temps que l'ack arrive.
+        """
+        self._session_token = None
+
+    def _handle_hello_ack(self, data: Dict[str, Any]) -> None:
+        """Trame ``hello.ack`` -> memorisation du jeton (sans interpretation)."""
+        token = session_token_from_ack(data)
+        if token is None:
+            # Serveur qui n'emet pas de jeton : on continue sans identite.
+            logger.debug("Pulse Chat: hello.ack sans jeton — session non identifiee")
+            return
+        self._session_token = token
+        logger.info("Pulse Chat: jeton de session recu (identite de l'agent active)")
+
+    def _auth_headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """En-tetes des appels sortants VERS L'APP.
+
+        Le Bearer de service reste inchange (il dit « ce plugin a le droit de
+        parler a l'app ») ; l'en-tete de session s'y AJOUTE quand elle existe
+        (elle dit « quel agent parle »).
+
+        Reservee aux appels qui s'authentifient par ce Bearer :
+        ``/api/agent/messages`` et le coffre. Le telechargement d'un media en
+        est exclu — les ``mediaUrls`` pointent pourtant bien vers le domaine
+        public de l'app (``/api/attachments/:id/download``, cf.
+        ``server/lib/signedDownload.ts``), mais cette route a son PROPRE schema
+        d'authentification : une signature HMAC portee par l'URL, verifiee par
+        ``verifyDownload``. Elle ne lit ni Bearer ni en-tete de session ; les y
+        poser n'aurait aucun effet.
+        """
+        headers = {"Authorization": f"Bearer {self.token}"}
+        if self._session_token:
+            headers[_SESSION_HEADER] = self._session_token
+        if extra:
+            headers.update(extra)
+        return headers
 
     # ── Cycle de vie ─────────────────────────────────────────────────────
 
@@ -279,6 +355,9 @@ class PulseChatAdapter(BasePlatformAdapter):
         # non livres de ces profils. Reconnexion => re-hello (meme chemin).
         try:
             hello_frame = build_hello(self.profiles, self.agent_name, capabilities)
+            # Le hello revoque le jeton precedent cote serveur : on l'oublie ici
+            # aussi, le nouveau arrivera par ``hello.ack``.
+            self._forget_session_token()
             await self._ws.send(json.dumps(hello_frame))
         except Exception as exc:
             logger.error("Pulse Chat: echec envoi hello — %s", exc)
@@ -349,7 +428,12 @@ class PulseChatAdapter(BasePlatformAdapter):
                     continue
                 if not isinstance(data, dict):
                     continue
-                if data.get("type") == "message.created":
+                if data.get("type") == _HELLO_ACK_TYPE:
+                    try:
+                        self._handle_hello_ack(data)
+                    except Exception:
+                        logger.exception("Pulse Chat: erreur de traitement hello.ack")
+                elif data.get("type") == "message.created":
                     try:
                         await self._handle_message_created(data)
                     except Exception:
@@ -490,8 +574,14 @@ class PulseChatAdapter(BasePlatformAdapter):
     async def _send_ack(self, message_id: Any) -> None:
         if self._ws is None:
             return
+        # Le jeton accompagne l'ack : le serveur sait ainsi QUEL agent acquitte
+        # quel message. Cle omise tant qu'aucun jeton n'a ete recu (trame
+        # strictement identique a celle d'avant ce contrat).
+        frame: Dict[str, Any] = {"type": "ack", "messageId": message_id}
+        if self._session_token:
+            frame["sessionToken"] = self._session_token
         try:
-            await self._ws.send(json.dumps({"type": "ack", "messageId": message_id}))
+            await self._ws.send(json.dumps(frame))
         except Exception as exc:
             logger.warning("Pulse Chat: echec envoi ack %s — %s", message_id, exc)
 
@@ -725,9 +815,9 @@ class PulseChatAdapter(BasePlatformAdapter):
         exception ne remonte : une operation de coffre en echec ne doit pas
         faire tomber le tour de parole de l'agent.
         """
-        headers = {"Authorization": "Bearer %s" % self.token}
-        if content_type:
-            headers["Content-Type"] = content_type
+        headers = self._auth_headers(
+            {"Content-Type": content_type} if content_type else None
+        )
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT) as response:
@@ -835,7 +925,7 @@ class PulseChatAdapter(BasePlatformAdapter):
             status = await asyncio.to_thread(self._post_json, url, payload)
         except urllib.error.HTTPError as exc:
             kind = self._error_kind_for_status(exc.code)
-            retryable = exc.code == 429 or exc.code >= 500
+            retryable = self._is_retryable_status(exc.code)
             logger.warning(
                 "Pulse Chat: POST /api/agent/messages -> HTTP %s (%s)", exc.code, kind
             )
@@ -854,7 +944,7 @@ class PulseChatAdapter(BasePlatformAdapter):
             return SendResult(
                 success=False,
                 error=f"HTTP {status}",
-                retryable=status == 429 or status >= 500,
+                retryable=self._is_retryable_status(status),
                 error_kind=self._error_kind_for_status(status),
             )
         return SendResult(success=True, message_id=hermes_id)
@@ -863,10 +953,7 @@ class PulseChatAdapter(BasePlatformAdapter):
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.token}",
-            },
+            headers=self._auth_headers({"Content-Type": "application/json"}),
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT) as response:
@@ -874,11 +961,29 @@ class PulseChatAdapter(BasePlatformAdapter):
             return int(response.status)
 
     @staticmethod
+    def _is_retryable_status(status: int) -> bool:
+        """L'envoi vaut-il d'etre rejoue plus tard ?
+
+        Le 409 de ``POST /api/agent/messages`` est TRANSITOIRE : sur cette
+        route, il ne signifie qu'une chose — « emetteur indeterminable »,
+        c'est-a-dire un canal multi-agents servi sans jeton de session. Or la
+        fermeture du WebSocket revoque la session cote serveur et le plugin
+        n'en retrouve une qu'au prochain ``hello.ack``, apres tout le backoff
+        de reconnexion. Pendant cette fenetre (un redeploiement de l'app, par
+        exemple), le classer en definitif jetait la reponse en cours de
+        l'agent avec un simple avertissement : elle disparaissait.
+        """
+        return status in (409, 429) or status >= 500
+
+    @staticmethod
     def _error_kind_for_status(status: int) -> str:
         if status in (401, 403):
             return "forbidden"
         if status == 404:
             return "not_found"
+        if status == 409:
+            # Session revoquee / pas encore rouverte — cf. _is_retryable_status.
+            return "transient"
         if status == 413:
             return "too_long"
         if status == 429:
