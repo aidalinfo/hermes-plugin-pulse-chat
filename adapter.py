@@ -44,6 +44,7 @@ import uuid
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
+from .approvals import build_approval_payload, parse_approval_reply
 from .capabilities import collect_capabilities
 from .classification import classify_outbound, parse_tool  # noqa: F401  (re-export)
 from .hello import build_hello, parse_profiles
@@ -198,6 +199,10 @@ class PulseChatAdapter(BasePlatformAdapter):
         self._media_dir: Optional[str] = None
         # Cache borne (FIFO) des derniers message ids traites — dedup du rejeu.
         self._seen_message_ids: "OrderedDict[str, None]" = OrderedDict()
+        # Approbations en attente : requestId -> Future resolue par la trame
+        # ``approval.reply``. Elles SURVIVENT a une coupure WS : l'app rejoue
+        # les decisions non livrees au prochain hello.
+        self._pending_approvals: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
 
     @property
     def name(self) -> str:
@@ -342,6 +347,11 @@ class PulseChatAdapter(BasePlatformAdapter):
                         await self._handle_message_created(data)
                     except Exception:
                         logger.exception("Pulse Chat: erreur de traitement message.created")
+                elif data.get("type") == "approval.reply":
+                    try:
+                        self._handle_approval_reply(data)
+                    except Exception:
+                        logger.exception("Pulse Chat: erreur de traitement approval.reply")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -575,6 +585,85 @@ class PulseChatAdapter(BasePlatformAdapter):
             "replyToHermesId": None,
         }
         return await self._post_agent_message(payload, str(message_id))
+
+    # ── Approbations d'actions sensibles ─────────────────────────────────
+
+    async def request_approval(
+        self,
+        chat_id: str,
+        tool: str,
+        command: str,
+        reason: Optional[str] = None,
+        options: Optional[List[str]] = None,
+        timeout: Optional[float] = None,
+        request_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Soumet une action sensible a l'approbation humaine et ATTEND la reponse.
+
+        Retourne le dict decrit par ``parse_approval_reply`` (dont
+        ``granted``), ou ``None`` si la demande n'a pas pu etre postee ou si
+        ``timeout`` expire.
+
+        ⚠️ ``None`` n'est PAS une autorisation : l'appelant doit le traiter
+        comme un refus. C'est deliberement a lui de trancher — l'adaptateur
+        transporte, il ne decide pas.
+
+        L'attente survit a une coupure du WebSocket : la decision prise
+        pendant la coupure est rejouee par l'app a la reconnexion (hello).
+        """
+        request_id = request_id or f"req-{uuid.uuid4().hex}"
+        payload = build_approval_payload(
+            channel_slug=chat_id,
+            request_id=request_id,
+            tool=tool,
+            command=command,
+            reason=reason,
+            options=options,
+        )
+
+        loop = asyncio.get_running_loop()
+        future: "asyncio.Future[Dict[str, Any]]" = loop.create_future()
+        self._pending_approvals[request_id] = future
+        try:
+            result = await self._post_agent_message(payload, request_id)
+            if not result.success:
+                logger.warning(
+                    "Pulse Chat: demande d'approbation non postee (%s) — %s",
+                    request_id,
+                    result.error,
+                )
+                return None
+            if timeout is None:
+                return await future
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Pulse Chat: aucune reponse d'approbation pour %s en %ss",
+                request_id,
+                timeout,
+            )
+            return None
+        finally:
+            self._pending_approvals.pop(request_id, None)
+
+    def _handle_approval_reply(self, data: Dict[str, Any]) -> None:
+        """Trame ``approval.reply`` -> resolution de l'attente correspondante."""
+        reply = parse_approval_reply(data)
+        if reply is None:
+            logger.warning("Pulse Chat: trame approval.reply inexploitable ignoree")
+            return
+        future = self._pending_approvals.get(reply["requestId"])
+        if future is None:
+            # Rejeu d'une decision dont l'attente est deja retombee (timeout,
+            # redemarrage du plugin) : rien a debloquer, on trace seulement.
+            logger.info(
+                "Pulse Chat: decision %s recue pour %s sans attente active",
+                reply["decision"],
+                reply["requestId"],
+            )
+            return
+        if not future.done():
+            future.set_result(reply)
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """No-op V1 (pas d'indicateur de frappe cote app)."""
