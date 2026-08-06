@@ -45,7 +45,9 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 from .approvals import build_approval_payload, parse_approval_reply
+from .artifacts import build_artifact_payload
 from .capabilities import collect_capabilities
+from .vault import vault_url
 from .classification import classify_outbound, parse_tool  # noqa: F401  (re-export)
 from .hello import build_hello, parse_profiles
 from .reconnect import is_retryable_ws_error, reconnect_delay
@@ -585,6 +587,117 @@ class PulseChatAdapter(BasePlatformAdapter):
             "replyToHermesId": None,
         }
         return await self._post_agent_message(payload, str(message_id))
+
+    # ── Artifacts (contenus riches publies dans le fil) ───────────────────
+
+    async def publish_artifact(
+        self,
+        chat_id: str,
+        kind: str,
+        content: str,
+        artifact_id: Optional[str] = None,
+        title: Optional[str] = None,
+    ) -> Optional[str]:
+        """Publie un artifact dans la conversation.
+
+        ``kind`` : mermaid | markdown | svg | html | drawio.
+        Reutiliser le meme ``artifact_id`` publie une NOUVELLE VERSION de
+        l'artifact existant (la carte du fil est mise a jour en place) plutot
+        que d'ajouter une carte.
+
+        Retourne l'``artifact_id`` utilise, ou ``None`` si le POST a echoue.
+        """
+        artifact_id = artifact_id or "art-%s" % uuid.uuid4().hex
+        payload = build_artifact_payload(
+            channel_slug=chat_id,
+            artifact_id=artifact_id,
+            kind=kind,
+            content=content,
+            title=title,
+        )
+        result = await self._post_agent_message(payload, artifact_id)
+        if not result.success:
+            logger.warning(
+                "Pulse Chat: artifact %s non publie — %s", artifact_id, result.error
+            )
+            return None
+        return artifact_id
+
+    # ── Coffre-fort (espace de travail par canal) ─────────────────────────
+
+    async def vault_list(self, chat_id: str) -> List[str]:
+        """Chemins des fichiers du coffre du canal (liste vide si echec)."""
+        data = await asyncio.to_thread(
+            self._vault_request, "GET", vault_url(self.base_url, chat_id)
+        )
+        if not data:
+            return []
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            logger.warning("Pulse Chat: reponse de listing du coffre illisible")
+            return []
+        files = payload.get("files") if isinstance(payload, dict) else None
+        if not isinstance(files, list):
+            return []
+        return [f.get("path") for f in files if isinstance(f, dict) and f.get("path")]
+
+    async def vault_read(self, chat_id: str, path: str) -> Optional[bytes]:
+        """Contenu d'un fichier du coffre, ou ``None`` s'il est introuvable."""
+        return await asyncio.to_thread(
+            self._vault_request, "GET", vault_url(self.base_url, chat_id, path)
+        )
+
+    async def vault_write(
+        self,
+        chat_id: str,
+        path: str,
+        content: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> bool:
+        """Ecrit (ou remplace) un fichier du coffre."""
+        result = await asyncio.to_thread(
+            self._vault_request,
+            "PUT",
+            vault_url(self.base_url, chat_id, path),
+            content,
+            content_type,
+        )
+        return result is not None
+
+    async def vault_delete(self, chat_id: str, path: str) -> bool:
+        result = await asyncio.to_thread(
+            self._vault_request, "DELETE", vault_url(self.base_url, chat_id, path)
+        )
+        return result is not None
+
+    def _vault_request(
+        self,
+        method: str,
+        url: str,
+        body: Optional[bytes] = None,
+        content_type: Optional[str] = None,
+    ) -> Optional[bytes]:
+        """Appel HTTP du coffre (bloquant — appele via ``asyncio.to_thread``).
+
+        Retourne le corps de la reponse, ou ``None`` en cas d'echec. Aucune
+        exception ne remonte : une operation de coffre en echec ne doit pas
+        faire tomber le tour de parole de l'agent.
+        """
+        headers = {"Authorization": "Bearer %s" % self.token}
+        if content_type:
+            headers["Content-Type"] = content_type
+        request = urllib.request.Request(url, data=body, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            logger.warning(
+                "Pulse Chat: coffre %s %s -> HTTP %s", method, url, exc.code
+            )
+        except Exception as exc:
+            logger.warning("Pulse Chat: coffre %s en echec — %s", method, exc)
+        return None
 
     # ── Approbations d'actions sensibles ─────────────────────────────────
 

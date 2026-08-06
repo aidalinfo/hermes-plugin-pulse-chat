@@ -63,9 +63,9 @@ def _install_gateway_stubs() -> None:
         TEXT = "text"
 
     class SendResult:
-        # TOUS les champs sont conserves : les stubs `gateway.*` sont installes
-        # une seule fois pour la session (premier fichier de test charge gagne),
-        # donc un stub tronque ici casserait les autres fichiers de test.
+        # Tous les champs sont conserves : les stubs gateway sont partages par
+        # TOUTE la session pytest (premier module charge = stub gagnant), donc
+        # un double incomplet ici casse les tests des autres fichiers.
         def __init__(self, success=False, message_id=None, error=None,
                      retryable=False, error_kind=None):
             self.success = success
