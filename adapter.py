@@ -82,6 +82,47 @@ def _get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
     return value if value is not None else default
 
 
+def agent_config_metadata(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Bloc ``agentConfig`` de la frame, repris TEL QUEL (fonction pure).
+
+    L'app pousse dans chaque ``message.created`` la configuration comportementale
+    du profil (``tone``, ``autonomy``, ``instructions``, ``disabledTools``). Le
+    plugin TRANSPORTE ce bloc et ne l'interprete pas : aucune valeur n'est lue,
+    validee, renommee ni filtree ici — c'est Hermes qui decide quoi en faire. Un
+    champ ajoute plus tard cote app arrive donc jusqu'a l'agent sans toucher au
+    plugin.
+
+    Renvoie ``None`` quand la cle est absente ou n'est pas un objet : une app
+    anterieure a ce contrat continue de fonctionner a l'identique (aucune cle
+    ``metadata`` n'est alors posee sur l'evenement).
+    """
+    block = data.get("agentConfig")
+    if not isinstance(block, dict):
+        return None
+    return {"agentConfig": block}
+
+
+def build_message_event(factory, kwargs: Dict[str, Any], metadata: Optional[Dict[str, Any]]):
+    """``MessageEvent`` porteur de ``metadata``, quelle que soit sa signature.
+
+    Le champ ``metadata`` n'existe pas forcement sur le ``MessageEvent`` de
+    toutes les versions d'Hermes (c'est une API interne — cf. 08-hermes-plugin).
+    On tente donc le mot-cle, puis on retombe sur l'attribut ; en dernier
+    recours l'evenement part sans son bloc plutot que de perdre le message.
+    """
+    if metadata is None:
+        return factory(**kwargs)
+    try:
+        return factory(metadata=metadata, **kwargs)
+    except TypeError:
+        event = factory(**kwargs)
+        try:
+            setattr(event, "metadata", metadata)
+        except Exception as exc:  # dataclass figee, __slots__…
+            logger.warning("Pulse Chat: agentConfig non transportable — %s", exc)
+        return event
+
+
 def _ws_url(base_url: str) -> str:
     """``http(s)://host[/path]`` -> ``ws(s)://host[/path]/ws/hermes``.
 
@@ -378,13 +419,20 @@ class PulseChatAdapter(BasePlatformAdapter):
             user_id=str(message.get("userId")) if message.get("userId") else None,
             user_name=message.get("userName"),
         )
-        event = MessageEvent(
-            text=message.get("text") or "",
-            message_type=MessageType.TEXT,
-            source=source,
-            message_id=str(message_id),
-            media_urls=media_urls,
-            media_types=media_types,
+        # Le bloc `agentConfig` de la frame est REPORTE dans l'evenement transmis
+        # a Hermes, sans interpretation : ton, autonomie, consignes et politique
+        # d'outils sont sans effet de bout en bout si le plugin les jette.
+        event = build_message_event(
+            MessageEvent,
+            {
+                "text": message.get("text") or "",
+                "message_type": MessageType.TEXT,
+                "source": source,
+                "message_id": str(message_id),
+                "media_urls": media_urls,
+                "media_types": media_types,
+            },
+            agent_config_metadata(data),
         )
 
         await self.handle_message(event)
