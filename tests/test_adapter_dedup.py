@@ -51,12 +51,23 @@ def _install_gateway_stubs() -> None:
         async def _notify_fatal_error(self):
             return None
 
+        async def play_tts(self, chat_id, audio_path, **kwargs):
+            """Repli d'Hermes : l'auto-TTS delegue a ``send_voice``."""
+            return await self.send_voice(
+                chat_id=chat_id, audio_path=audio_path, **kwargs
+            )
+
     class MessageEvent:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
 
     class MessageType:
         TEXT = "text"
+        # VOICE existe bien dans Hermes (`gateway/platforms/base.py`) : c'est ce
+        # type qui declenche la transcription automatique de l'audio entrant ET
+        # l'auto-TTS de la reponse. Sans lui dans le stub, tout test touchant
+        # une note vocale echouerait sur un AttributeError trompeur.
+        VOICE = "voice"
 
     class SendResult:
         def __init__(self, success=False, message_id=None, error=None,

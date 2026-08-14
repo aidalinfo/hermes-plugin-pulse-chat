@@ -52,6 +52,14 @@ from .artifacts import (
 )
 from .capabilities import collect_capabilities
 from .vault import vault_url
+from .voice import (
+    MAX_VOICE_BYTES,
+    caption_header,
+    guess_audio_mime,
+    is_audio_mime,
+    voice_filename,
+    voice_url,
+)
 from .classification import classify_outbound, parse_tool  # noqa: F401  (re-export)
 from .hello import build_hello, parse_profiles
 from .metrics import extract_metrics
@@ -547,11 +555,21 @@ class PulseChatAdapter(BasePlatformAdapter):
         # Le bloc `agentConfig` de la frame est REPORTE dans l'evenement transmis
         # a Hermes, sans interpretation : ton, autonomie, consignes et politique
         # d'outils sont sans effet de bout en bout si le plugin les jette.
+        # Note vocale : le type du message decide de DEUX comportements du
+        # coeur Hermes que l'adaptateur ne peut pas obtenir autrement —
+        # la transcription automatique de l'audio entrant, et l'auto-TTS de la
+        # reponse (qui ne se declenche QUE sur un message entrant de type VOICE,
+        # cf. `_should_auto_tts_for_chat` dans gateway/platforms/base.py).
+        # L'annonce de l'app fait foi ; le MIME telecharge sert de repli pour
+        # rester correct si un jour elle ne l'annonce plus.
+        is_voice = str(message.get("messageType") or "").lower() == "voice" or any(
+            is_audio_mime(mime) for mime in media_types
+        )
         event = build_message_event(
             MessageEvent,
             {
                 "text": message.get("text") or "",
-                "message_type": MessageType.TEXT,
+                "message_type": MessageType.VOICE if is_voice else MessageType.TEXT,
                 "source": source,
                 "message_id": str(message_id),
                 "media_urls": media_urls,
@@ -590,11 +608,15 @@ class PulseChatAdapter(BasePlatformAdapter):
     async def _download_media(
         self, urls: List[str]
     ) -> Tuple[List[str], List[str]]:
-        """Telecharge localement les images de ``mediaUrls``.
+        """Telecharge localement les images et les notes vocales de ``mediaUrls``.
 
-        Seules les images sont materialisees (vision) ; les autres documents
-        restent des URLs presignees dans le texte du message (l'agent les lit
-        avec ses outils) — decision 2 du plan.
+        Images (vision) et audio (transcription) sont materialises ; les autres
+        documents restent des URLs presignees dans le texte du message (l'agent
+        les lit avec ses outils) — decision 2 du plan.
+
+        L'audio DOIT etre un fichier local : la transcription automatique du
+        gateway ouvre le chemin avec le fournisseur STT, elle ne suit pas une
+        URL. Une note vocale laissee en URL arriverait donc muette.
         """
         paths: List[str] = []
         types: List[str] = []
@@ -615,11 +637,18 @@ class PulseChatAdapter(BasePlatformAdapter):
         )
         with urllib.request.urlopen(request, timeout=30) as response:
             mime = response.headers.get_content_type() or ""
-            if not mime.startswith("image/"):
+            audio = is_audio_mime(mime)
+            if not mime.startswith("image/") and not audio:
                 return None, None
-            data = response.read(_MEDIA_MAX_BYTES + 1)
-            if len(data) > _MEDIA_MAX_BYTES:
-                logger.warning("Pulse Chat: image trop volumineuse ignoree (%s)", url)
+            # L'audio a son propre plafond, plus bas : au-dela, aucun
+            # fournisseur STT n'accepte le fichier (25 Mo cote Hermes), le
+            # telecharger serait du transfert pour rien.
+            cap = MAX_VOICE_BYTES if audio else _MEDIA_MAX_BYTES
+            data = response.read(cap + 1)
+            if len(data) > cap:
+                logger.warning(
+                    "Pulse Chat: media trop volumineux ignore (%s, %s)", mime, url
+                )
                 return None, None
         if self._media_dir is None:
             self._media_dir = tempfile.mkdtemp(prefix="pulse-chat-media-")
@@ -687,6 +716,116 @@ class PulseChatAdapter(BasePlatformAdapter):
             "replyToHermesId": None,
         }
         return await self._post_agent_message(payload, str(message_id))
+
+    # ── Notes vocales (l'agent parle) ─────────────────────────────────────
+
+    async def send_voice(
+        self,
+        chat_id: str,
+        audio_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Poste un fichier audio comme note vocale dans le canal.
+
+        Point d'entree OBLIGATOIRE pour que l'agent parle : sans cette methode,
+        le repli de ``BasePlatformAdapter`` poste le texte ``🔊 Audio: <chemin>``
+        — donc un chemin de conteneur, dans le fil d'un client, et aucun son.
+
+        Appelee par deux chemins d'Hermes, et c'est voulu :
+        - l'auto-TTS de la reponse (via ``play_tts``, qui delegue ici) ;
+        - le tool ``text_to_speech`` de l'agent, dont le ``MEDIA:<path>`` est
+          route vers l'envoi audio de la plateforme.
+
+        Un echec ne leve JAMAIS : le texte de la reponse est envoye separement
+        par le gateway, une note vocale perdue ne doit pas emporter le tour de
+        parole. Il est journalise et rendu en ``SendResult`` non concluant.
+        """
+        mime = guess_audio_mime(audio_path)
+        try:
+            data = await asyncio.to_thread(self._read_audio, audio_path)
+        except FileNotFoundError:
+            logger.warning("Pulse Chat: audio introuvable — %s", audio_path)
+            return SendResult(
+                success=False, error="audio introuvable", error_kind="permanent"
+            )
+        except ValueError as exc:
+            logger.warning("Pulse Chat: audio refuse — %s", exc)
+            return SendResult(success=False, error=str(exc), error_kind="permanent")
+        except Exception as exc:
+            logger.warning("Pulse Chat: lecture audio en echec — %s", exc)
+            return SendResult(
+                success=False, error=str(exc), retryable=True, error_kind="transient"
+            )
+
+        headers = {
+            "Content-Type": mime,
+            "x-filename": urllib.parse.quote(voice_filename(mime), safe=""),
+        }
+        encoded_caption = caption_header(caption)
+        if encoded_caption:
+            headers["x-caption"] = encoded_caption
+        if reply_to:
+            headers["x-reply-to"] = urllib.parse.quote(str(reply_to), safe="")
+
+        url = voice_url(self.base_url, str(chat_id))
+        try:
+            status, body = await asyncio.to_thread(
+                self._post_bytes, url, data, headers
+            )
+        except urllib.error.HTTPError as exc:
+            logger.warning("Pulse Chat: POST /api/agent/voice -> HTTP %s", exc.code)
+            return SendResult(
+                success=False,
+                error="HTTP %s: %s" % (exc.code, exc.reason),
+                retryable=self._is_retryable_status(exc.code),
+                error_kind=self._error_kind_for_status(exc.code),
+            )
+        except Exception as exc:
+            logger.warning("Pulse Chat: POST /api/agent/voice en echec — %s", exc)
+            return SendResult(
+                success=False, error=str(exc), retryable=True, error_kind="transient"
+            )
+        if status >= 400:
+            return SendResult(
+                success=False,
+                error="HTTP %s" % status,
+                retryable=self._is_retryable_status(status),
+                error_kind=self._error_kind_for_status(status),
+            )
+
+        # L'id rendu est celui du MESSAGE cote app : c'est lui qui sert de
+        # cible a une reponse ulterieure, pas l'id de la piece audio.
+        message_id = None
+        if body:
+            try:
+                message_id = (json.loads(body) or {}).get("id")
+            except Exception:
+                message_id = None
+        return SendResult(success=True, message_id=message_id or uuid.uuid4().hex)
+
+    @staticmethod
+    def _read_audio(path: str) -> bytes:
+        """Lit un fichier audio en refusant ce que le serveur refuserait."""
+        with open(path, "rb") as handle:
+            data = handle.read(MAX_VOICE_BYTES + 1)
+        if not data:
+            raise ValueError("fichier audio vide")
+        if len(data) > MAX_VOICE_BYTES:
+            raise ValueError("note vocale trop volumineuse")
+        return data
+
+    def _post_bytes(
+        self, url: str, body: bytes, headers: Dict[str, str]
+    ) -> Tuple[int, bytes]:
+        """POST d'un corps binaire (bloquant — via ``asyncio.to_thread``)."""
+        request = urllib.request.Request(
+            url, data=body, headers=self._auth_headers(headers), method="POST"
+        )
+        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT) as response:
+            return int(response.status), response.read()
 
     # ── Artifacts (contenus riches publies dans le fil) ───────────────────
 

@@ -59,6 +59,21 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
 - **Documents** : les URLs présignées restent dans le **texte** du message
   (l'agent les lit avec ses outils, validité ~15 min) ; les **images** de
   `mediaUrls` sont téléchargées localement et passées en `media_urls` (vision).
+- **Notes vocales** (`voice.py`) — les deux sens :
+  - *entrant* : une frame `message.created` portant `messageType: 'voice'`
+    (ou un média `audio/*`) produit un `MessageEvent` de type **`VOICE`**, audio
+    matérialisé en fichier local. C'est ce type qui déclenche, **côté Hermes**,
+    la transcription automatique (`stt.provider`) **et** l'auto-TTS de la
+    réponse — un audio typé `TEXT` donne un agent sourd et muet, sans erreur ;
+  - *sortant* : `send_voice()` poste l'audio brut sur
+    `POST <PULSE_CHAT_URL>/api/agent/voice/<slug>` (`Content-Type` = type audio,
+    `x-filename` et `x-caption` percent-encodés). Appelé par l'auto-TTS
+    (`play_tts`) **et** par le tool `text_to_speech` de l'agent.
+    Sans cette méthode, le repli d'Hermes posterait `🔊 Audio: <chemin>` — un
+    chemin de conteneur dans le fil d'un client, et aucun son.
+  - L'audio sortant suit le chemin des **pièces jointes** (S3, presign 15 min,
+    audit), **pas le coffre-fort** : le coffre est un espace de travail borné
+    par un quota de fichiers, qu'une note vocale par réponse remplirait.
 
 ## Installation (machine du bot)
 
@@ -100,6 +115,28 @@ plugins:
   enabled:
     - pulse-chat
 ```
+
+Pour que l'agent **parle** (notes vocales), ajouter au même fichier :
+
+```yaml
+voice:
+  auto_tts: true            # répondre en audio à un message AUDIO entrant
+                            # (jamais à un message texte : le déclencheur Hermes
+                            #  est le type VOICE du message reçu)
+tts:
+  provider: mistral         # Voxtral TTS — clé MISTRAL_API_KEY
+  mistral:
+    model: voxtral-mini-tts-2603
+    # voice_id: c69964a6-ab8b-4f8a-9465-ec0925096ec8   # Paul – Neutral (défaut)
+stt:
+  provider: mistral         # Voxtral Transcribe — même clé
+  language: fr
+```
+
+Le toolset `tts` doit être actif pour que l'agent puisse aussi parler de sa
+propre initiative (`text_to_speech`) ; l'auto-TTS, lui, n'en dépend pas.
+Le SDK `mistralai==2.4.8` est installé à la demande par Hermes : dans un
+conteneur, le figer dans l'image (sinon réinstallé à chaque reconstruction).
 
 Puis redémarrer : `hermes gateway restart`.
 Debug de la découverte plugin : `HERMES_PLUGINS_DEBUG=1`.
