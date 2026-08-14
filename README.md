@@ -85,6 +85,29 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
   de l'int16) : le module convertit, sans quoi l'audio sort deux fois plus long
   et inintelligible. Sans effet sur une version d'Hermes antérieure au contrat
   de streaming (v0.20) — l'installation est alors inerte.
+- **Contrat de streaming audio** (`audio_stream.py`, `#60671`) : l'adaptateur
+  implémente `supports/begin/write/finish/abort_streaming_tts` et **transporte**
+  le PCM que produit Hermes ; le découpage en phrases, la synthèse et la
+  suppression du doublon « audio complet » restent en amont.
+  **Négociation** : `supports_streaming_tts` ne répond `true` que si l'app l'a
+  annoncé dans son `hello.ack` — `{"audio": {"streaming": true,
+  "sampleRate": 24000}}`. Sans ce bloc, rien ne change : ce plugin peut donc
+  être déployé **avant** l'app.
+
+  Trames sur le WS existant (bornes en JSON, PCM en binaire) :
+
+  ```
+  {"type":"audio.begin","chatId","streamId","format":{sampleRate,channels,sampleWidth}}
+  <binaire>  octet 0 version(1) · octet 1 type(1) · octets 2-3 longueur d'en-tête (uint16 LE)
+             en-tête JSON {"chatId","streamId","seq"} · puis PCM int16 LE mono
+  {"type":"audio.end","chatId","streamId","interrupted":bool}
+  {"type":"audio.abort","chatId","streamId","error":string|null}
+  ```
+
+  Le `streamId` permet à l'app de **jeter** les morceaux d'un tour interrompu ;
+  le `seq` rend visible une perte d'ordre, qui s'entendrait sinon comme un
+  hoquet inexplicable. `decode_audio_frame()` est la définition exécutable du
+  format — l'app la réimplémente en TypeScript d'après elle.
 
 ## Installation (machine du bot)
 

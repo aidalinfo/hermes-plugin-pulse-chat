@@ -50,6 +50,14 @@ from .artifacts import (
     default_artifact_id,
     default_artifact_path,
 )
+from .audio_stream import (
+    abort_frame,
+    audio_capability_from_ack,
+    begin_frame,
+    capability_accepts,
+    encode_audio_frame,
+    end_frame,
+)
 from .capabilities import collect_capabilities
 from .vault import vault_url
 from .voice import (
@@ -73,6 +81,27 @@ from gateway.platforms.base import (
 )
 from gateway.config import Platform
 
+try:  # Hermes >= v0.20 — contrat de streaming audio (#60671)
+    from gateway.platforms.base import StreamingTTSHandle
+
+    _HAS_STREAMING_CONTRACT = True
+except ImportError:  # pragma: no cover - Hermes anterieur au contrat
+    # Import SEPARE du bloc ci-dessus, et c'est volontaire : le regrouper
+    # ferait echouer tout l'import du plugin sur une version d'Hermes qui ne
+    # connait pas encore le contrat — le bot perdrait le chat, pas seulement la
+    # voix. Ici, les 5 methodes restent definies mais ne servent jamais : sans
+    # `StreamingTTSConsumer` en face, personne ne les appelle.
+    from dataclasses import dataclass, field
+
+    @dataclass
+    class StreamingTTSHandle:  # type: ignore[no-redef]
+        chat_id: str = ""
+        audio_format: Any = None
+        audible: bool = False
+        aborted: bool = False
+
+    _HAS_STREAMING_CONTRACT = False
+
 logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT = 15.0
@@ -90,6 +119,25 @@ _DEDUP_MAX_IDS = 500
 # jamais « ce message m'est-il destine » : il transporte.
 _HELLO_ACK_TYPE = "hello.ack"
 _SESSION_HEADER = "x-hermes-session"
+# Format audio par defaut du contrat Hermes, et borne sur les flux ouverts
+# simultanement (un par tour de parole ; au-dela, une fin de flux s'est perdue).
+DEFAULT_SAMPLE_RATE = 24000
+_AUDIO_STREAMS_MAX = 8
+
+
+class _AudioStreamHandle(StreamingTTSHandle):
+    """``StreamingTTSHandle`` + ce dont le transport a besoin.
+
+    Le contrat autorise explicitement les adaptateurs a etendre le handle avec
+    leur etat de plateforme. Ici : l'identifiant du flux (que l'app utilise pour
+    jeter les morceaux d'un tour interrompu) et le numero de sequence (qui rend
+    visible une perte d'ordre, laquelle s'entendrait sinon comme un hoquet).
+    """
+
+    def __init__(self, chat_id: str, audio_format: Any, stream_id: str) -> None:
+        super().__init__(chat_id=chat_id, audio_format=audio_format)
+        self.stream_id = stream_id
+        self.seq = 0
 
 
 def _get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -233,6 +281,11 @@ class PulseChatAdapter(BasePlatformAdapter):
         # a l'identique, sans en-tete de session (serveur anterieur, ou trame
         # perdue) — la compatibilite prime.
         self._session_token: Optional[str] = None
+        # Capacite audio annoncee par l'app au `hello.ack` (None = pas de flux).
+        self._audio_capability: Optional[Dict[str, Any]] = None
+        # Flux audio ouverts, par streamId — bornes pour ne jamais fuir si une
+        # fin de flux se perd (deconnexion en plein tour).
+        self._audio_streams: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._ws = None
         self._recv_task: Optional[asyncio.Task] = None
         # Reconnexion auto-pilotee (le gateway ne retente qu'une fois — cf.
@@ -265,6 +318,10 @@ class PulseChatAdapter(BasePlatformAdapter):
         reviendrait a presenter une identite morte le temps que l'ack arrive.
         """
         self._session_token = None
+        # La capacite audio est portee par la session : un nouveau `hello` la
+        # remet a zero tant que l'app ne l'a pas re-annoncee. Sans ca, une app
+        # redeployee sans le support audio continuerait de recevoir du PCM.
+        self._audio_capability = None
 
     def _handle_hello_ack(self, data: Dict[str, Any]) -> None:
         """Trame ``hello.ack`` -> memorisation du jeton (sans interpretation)."""
@@ -275,6 +332,16 @@ class PulseChatAdapter(BasePlatformAdapter):
             return
         self._session_token = token
         logger.info("Pulse Chat: jeton de session recu (identite de l'agent active)")
+        # Capacite audio : c'est l'APP qui ouvre la voie parlee en flux. Une app
+        # qui n'annonce rien laisse le plugin dans son comportement d'avant
+        # (audio complet en fin de tour) — le plugin peut donc etre deploye en
+        # premier sans rien changer au produit.
+        self._audio_capability = audio_capability_from_ack(data)
+        if self._audio_capability:
+            logger.info(
+                "Pulse Chat: l'app accepte l'audio en flux (%s Hz)",
+                self._audio_capability.get("sampleRate") or "libre",
+            )
 
     def _auth_headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         """En-tetes des appels sortants VERS L'APP.
@@ -393,6 +460,7 @@ class PulseChatAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         """Arret propre : marque deconnecte, annule les boucles, ferme le WS."""
         self._mark_disconnected()
+        self._abort_open_audio_streams()
 
         reconnect_task, self._reconnect_task = self._reconnect_task, None
         if reconnect_task and not reconnect_task.done():
@@ -826,6 +894,117 @@ class PulseChatAdapter(BasePlatformAdapter):
         )
         with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT) as response:
             return int(response.status), response.read()
+
+    # ── Audio en flux : l'agent parle pendant qu'il redige ────────────────
+    #
+    # Contrat d'adaptateur d'Hermes (#60671). Le decoupage en phrases, la
+    # synthese au fil de l'eau, la suppression du doublon « audio complet » et
+    # l'annulation sont tenus par `gateway/streaming_tts_consumer.py` : ces cinq
+    # methodes ne sont qu'un TUYAU vers l'app. Toute logique ajoutee ici serait
+    # une logique de plus a maintenir contre une API interne.
+
+    def supports_streaming_tts(self, chat_id: str, audio_format: Any) -> bool:
+        """L'app peut-elle jouer du PCM en flux pour ce canal ?
+
+        Trois refus, tous silencieux et tous rattrapes par le repli natif
+        d'Hermes (audio complet en fin de tour) : pas de WebSocket, pas de
+        capacite annoncee par l'app, ou une frequence que son lecteur ne joue
+        pas. C'est ce qui permet de deployer ce plugin AVANT l'app.
+        """
+        if self._ws is None:
+            return False
+        sample_rate = getattr(audio_format, "sample_rate", None) or DEFAULT_SAMPLE_RATE
+        return capability_accepts(self._audio_capability, sample_rate)
+
+    async def begin_streaming_tts(
+        self,
+        chat_id: str,
+        audio_format: Any,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[StreamingTTSHandle]:
+        """Ouvre une piste audio. ``None`` = on decline, Hermes replie."""
+        if not self.supports_streaming_tts(chat_id, audio_format):
+            return None
+
+        stream_id = uuid.uuid4().hex
+        try:
+            await self._ws.send(json.dumps(begin_frame(str(chat_id), stream_id, audio_format)))
+        except Exception as exc:
+            # Decliner plutot que lever : le consumer retombe proprement sur
+            # l'audio complet, et le tour de parole n'est pas perdu.
+            logger.warning("Pulse Chat: ouverture du flux audio en echec — %s", exc)
+            return None
+
+        handle = _AudioStreamHandle(str(chat_id), audio_format, stream_id)
+        self._audio_streams[stream_id] = handle
+        # Borne de securite : une fin de flux perdue (deconnexion en plein tour)
+        # ne doit pas faire grossir ce dictionnaire indefiniment.
+        while len(self._audio_streams) > _AUDIO_STREAMS_MAX:
+            _, stale = self._audio_streams.popitem(last=False)
+            stale.aborted = True
+        return handle
+
+    async def write_streaming_tts(self, handle: StreamingTTSHandle, chunk: bytes) -> None:
+        """Pousse un morceau de PCM. LEVE en cas d'echec (contrat)."""
+        if handle is None or getattr(handle, "aborted", False) or not chunk:
+            # Morceau en retard apres une interruption : jete en silence, comme
+            # l'exige l'idempotence de `abort_streaming_tts`.
+            return
+        if self._ws is None:
+            raise RuntimeError("WebSocket Pulse Chat ferme")
+
+        stream_id = getattr(handle, "stream_id", "")
+        seq = getattr(handle, "seq", 0)
+        # `await` sur l'envoi : c'est aussi ce qui exerce la contre-pression
+        # quand le lien est plus lent que la synthese.
+        await self._ws.send(encode_audio_frame(handle.chat_id, stream_id, seq, chunk))
+        handle.seq = seq + 1
+
+    async def finish_streaming_tts(
+        self, handle: StreamingTTSHandle, *, interrupted: bool = False
+    ) -> None:
+        """Fin normale du flux. Ne leve jamais : le tour est deja dit."""
+        if handle is None:
+            return
+        stream_id = getattr(handle, "stream_id", "")
+        self._audio_streams.pop(stream_id, None)
+        if self._ws is None:
+            return
+        try:
+            await self._ws.send(
+                json.dumps(end_frame(handle.chat_id, stream_id, interrupted))
+            )
+        except Exception as exc:
+            logger.debug("Pulse Chat: fin de flux audio non transmise — %s", exc)
+
+    async def abort_streaming_tts(
+        self, handle: StreamingTTSHandle, error: Optional[str] = None
+    ) -> None:
+        """Abandon — IDEMPOTENT : les morceaux en retard sont jetes, pas levees."""
+        if handle is None or getattr(handle, "aborted", False):
+            return
+        handle.aborted = True
+        stream_id = getattr(handle, "stream_id", "")
+        self._audio_streams.pop(stream_id, None)
+        if self._ws is None:
+            return
+        try:
+            await self._ws.send(
+                json.dumps(abort_frame(handle.chat_id, stream_id, error))
+            )
+        except Exception as exc:
+            logger.debug("Pulse Chat: abandon de flux audio non transmis — %s", exc)
+
+    def _abort_open_audio_streams(self) -> None:
+        """Coupe les flux restes ouverts (deconnexion en plein tour).
+
+        Sans ca, un `write` tardif reprendrait sur une nouvelle connexion avec
+        un `streamId` que l'app ne connait plus : du son sorti de nulle part,
+        par-dessus le tour suivant.
+        """
+        for handle in self._audio_streams.values():
+            handle.aborted = True
+        self._audio_streams.clear()
 
     # ── Artifacts (contenus riches publies dans le fil) ───────────────────
 
