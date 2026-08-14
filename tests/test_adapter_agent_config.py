@@ -55,12 +55,22 @@ def _install_gateway_stubs() -> None:
         async def _notify_fatal_error(self):
             return None
 
+        async def play_tts(self, chat_id, audio_path, **kwargs):
+            """Repli d'Hermes : l'auto-TTS delegue a ``send_voice``."""
+            return await self.send_voice(
+                chat_id=chat_id, audio_path=audio_path, **kwargs
+            )
+
     class MessageEvent:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
 
     class MessageType:
         TEXT = "text"
+        # Voir le commentaire jumeau dans test_adapter_dedup.py : les stubs
+        # gateway sont partages par toute la session pytest, les deux copies
+        # doivent donc rester identiques.
+        VOICE = "voice"
 
     class SendResult:
         # Tous les champs sont conserves : les stubs gateway sont partages par
