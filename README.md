@@ -74,6 +74,17 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
   - L'audio sortant suit le chemin des **pièces jointes** (S3, presign 15 min,
     audit), **pas le coffre-fort** : le coffre est un espace de travail borné
     par un quota de fichiers, qu'une note vocale par réponse remplirait.
+- **Voix en flux** (`voxtral_streaming.py`) : Hermes n'enregistre que quatre
+  streamers TTS (`elevenlabs`, `openai`, `gemini`, `xai`) et refuse de changer
+  de fournisseur en silence — un agent en `tts.provider: mistral` ne parlerait
+  donc qu'une fois la réponse **entièrement rédigée**. Ce module enregistre
+  `mistral` comme streamer : `POST /v1/audio/speech` avec `stream: true` et
+  `response_format: pcm`, événements SSE `speech.audio.delta`.
+  **Mesuré le 2026-08-14 : premier son à 0,53 s** sur une phrase courte.
+  ⚠️ Le flux `pcm` de Mistral est du **float32** (le `wav` du même endpoint est
+  de l'int16) : le module convertit, sans quoi l'audio sort deux fois plus long
+  et inintelligible. Sans effet sur une version d'Hermes antérieure au contrat
+  de streaming (v0.20) — l'installation est alors inerte.
 
 ## Installation (machine du bot)
 

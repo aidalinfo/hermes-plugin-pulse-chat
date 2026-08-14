@@ -11,3 +11,15 @@ except ImportError as exc:  # pragma: no cover - chemin hors runtime hermes
         register = None  # type: ignore[assignment]
     else:
         raise
+
+# Streamer TTS Voxtral : sans lui, un agent en `tts.provider: mistral` ne parle
+# qu'une fois la reponse entierement redigee (Mistral n'est pas un streamer
+# enregistre en amont, et Hermes refuse de changer de fournisseur en silence).
+# Sans effet sur une version d'Hermes anterieure au contrat de streaming, et
+# sans effet sur le chat texte : l'echec est journalise, jamais propage.
+try:
+    from .voxtral_streaming import install as _install_voxtral_streaming
+
+    _install_voxtral_streaming()
+except Exception:  # pragma: no cover - jamais bloquant pour le plugin
+    pass
