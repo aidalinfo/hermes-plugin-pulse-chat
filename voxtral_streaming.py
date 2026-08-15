@@ -237,7 +237,28 @@ def install() -> bool:
             )
             # Failures RAISE, per the provider contract: the consumer logs them
             # and falls back to whole-file TTS when nothing was audible yet.
-            with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
-                yield from iter_pcm_chunks(iter_sse_lines(response))
+            #
+            # They are ALSO logged here, because the consumer's own log is not
+            # always reachable: a turn that opens an audio track and produces
+            # nothing looks, from the app, exactly like a turn that succeeded
+            # and had nothing to say. One line here names the difference.
+            emitted = 0
+            try:
+                with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+                    for chunk in iter_pcm_chunks(iter_sse_lines(response)):
+                        emitted += 1
+                        yield chunk
+            except Exception as exc:
+                logger.warning(
+                    "Voxtral streaming: synthese en echec apres %s morceau(x) — %s",
+                    emitted,
+                    exc,
+                )
+                raise
+            if emitted == 0:
+                logger.warning(
+                    "Voxtral streaming: aucune donnee audio pour %s caracteres de texte",
+                    len(text),
+                )
 
     return True
