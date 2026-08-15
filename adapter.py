@@ -342,6 +342,8 @@ class PulseChatAdapter(BasePlatformAdapter):
         # a l'identique, sans en-tete de session (serveur anterieur, ou trame
         # perdue) — la compatibilite prime.
         self._session_token: Optional[str] = None
+        # Derniere source par canal — cle de session d'une interruption.
+        self._last_source: Dict[str, Any] = {}
         # Capacite audio annoncee par l'app au `hello.ack` (None = pas de flux).
         self._audio_capability: Optional[Dict[str, Any]] = None
         # Flux audio ouverts, par streamId — bornes pour ne jamais fuir si une
@@ -383,6 +385,40 @@ class PulseChatAdapter(BasePlatformAdapter):
         # remet a zero tant que l'app ne l'a pas re-annoncee. Sans ca, une app
         # redeployee sans le support audio continuerait de recevoir du PCM.
         self._audio_capability = None
+
+    async def _handle_call_interrupt(self, data: Dict[str, Any]) -> None:
+        """``call.interrupt`` -> arrete le tour en cours pour ce canal.
+
+        L'humain a repris la parole pendant que l'agent parlait. Couper le SON
+        cote navigateur ne suffit pas : sans cet arret, Hermes finit de rediger,
+        ouvre un nouveau flux a la phrase suivante, et la voix repart par-dessus
+        celle de l'humain — pour un texte que plus personne n'ecoute.
+
+        Best effort, jamais bloquant : un canal jamais vu (aucun message recu
+        depuis la connexion) n'a pas de session a arreter.
+        """
+        chat_id = str(data.get("chatId") or "")
+        if not chat_id:
+            return
+        source = self._last_source.get(chat_id)
+        if source is None:
+            logger.info(
+                "Pulse Chat: interruption demandee pour %s, aucune session connue", chat_id
+            )
+            return
+        try:
+            from gateway.session import build_session_key
+
+            session_key = build_session_key(
+                source,
+                group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+                thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+            )
+        except Exception as exc:
+            logger.warning("Pulse Chat: cle de session introuvable pour %s — %s", chat_id, exc)
+            return
+        await self.interrupt_session_activity(session_key, chat_id)
+        logger.info("Pulse Chat: tour interrompu a la demande de l'humain (%s)", chat_id)
 
     def _handle_hello_ack(self, data: Dict[str, Any]) -> None:
         """Trame ``hello.ack`` -> memorisation du jeton (sans interpretation)."""
@@ -580,6 +616,11 @@ class PulseChatAdapter(BasePlatformAdapter):
                         await self._handle_message_created(data)
                     except Exception:
                         logger.exception("Pulse Chat: erreur de traitement message.created")
+                elif data.get("type") == "call.interrupt":
+                    try:
+                        await self._handle_call_interrupt(data)
+                    except Exception:
+                        logger.exception("Pulse Chat: erreur de traitement call.interrupt")
                 elif data.get("type") == "approval.reply":
                     try:
                         self._handle_approval_reply(data)
@@ -679,6 +720,9 @@ class PulseChatAdapter(BasePlatformAdapter):
             message.get("mediaUrls") or []
         )
 
+        # Source MEMORISEE par canal : c'est elle qui permet de reconstruire la
+        # cle de session au moment d'une interruption (`call.interrupt`), sans
+        # quoi on ne saurait pas QUELLE session arreter.
         source = self.build_source(
             chat_id=slug,
             chat_name=channel.get("name") or slug,
@@ -712,6 +756,7 @@ class PulseChatAdapter(BasePlatformAdapter):
             agent_config_metadata(data),
         )
 
+        self._last_source[slug] = source
         await self.handle_message(event)
         self._remember_message_id(dedup_key)
         await self._send_ack(message_id)
