@@ -1,0 +1,183 @@
+# -*- coding: utf-8 -*-
+"""Connecteurs tiers (Outlook, Teams, agenda) — partie PURE.
+
+Meme principe que ``vault.py``, et pour la meme raison : le plugin n'a AUCUN
+identifiant OAuth, aucun scope, aucune URL Microsoft. Il demande une CAPACITE a
+l'app, avec le Bearer de service deja en place ; c'est l'app qui choisit le
+compte, resout le jeton, appelle le fournisseur et audite.
+
+    POST /api/agent/connectors/<capability>
+        {channelSlug, params, onBehalfOf?, grantId?}
+
+Ce module ne fait pas d'I/O : il construit l'URL, valide localement ce que le
+serveur refuserait de toute facon, et traduit les codes d'erreur en messages
+exploitables par l'agent. Le controle qui FAIT foi reste celui du serveur —
+celui-ci n'est qu'un garde-fou de confort, jamais la frontiere de securite.
+
+La liste blanche ci-dessous DUPLIQUE volontairement
+``app/pulse-chat/shared/connectors.ts``. C'est un doublon assume : il evite un
+aller-retour reseau pour une capacite manifestement inexistante. En cas de
+divergence, le serveur tranche.
+"""
+
+from typing import Any, Dict, Optional
+from urllib.parse import quote
+
+#: Capacites connues, avec leur effet de bord. Miroir de shared/connectors.ts.
+#: ``True`` ⇒ l'action a un effet HORS du produit et demandera l'accord d'un
+#: humain (sauf delegation explicitement dispensee).
+CONNECTOR_CAPABILITIES: Dict[str, bool] = {
+    "mail.read": False,
+    # Redige un brouillon dans la boite du delegant ; c'est LUI qui envoie.
+    # Rien ne quitte le tenant, donc aucun effet de bord de notre point de vue —
+    # et aucune approbation asynchrone a calibrer. A preferer a ``mail.send``.
+    "mail.draft": False,
+    "mail.send": True,
+    "calendar.read": False,
+    "calendar.write": True,
+    "teams.post": True,
+}
+
+#: Codes d'erreur du serveur, et ce que l'agent doit en faire. Traduire ici
+#: plutot que de laisser remonter un HTTP nu : un agent qui recoit « 403 » ne
+#: sait pas s'il doit renoncer, reformuler, ou demander quelque chose a l'humain.
+CONNECTOR_ERROR_HINTS: Dict[str, str] = {
+    "agent_credential_required": (
+        "Cette action exige un secret d'agent (AgentCredential). Le deploiement "
+        "doit definir PULSE_CHAT_AGENT_TOKEN — ne pas reessayer."
+    ),
+    "connector_no_grant": (
+        "Aucune delegation active ne couvre cette action. Demander a l'utilisateur "
+        "d'en accorder une depuis ses reglages, puis reessayer."
+    ),
+    "connector_grant_ambiguous": (
+        "Plusieurs comptes conviennent. DEMANDER a l'utilisateur lequel utiliser, "
+        "puis rappeler avec `grantId`. Ne jamais choisir soi-meme."
+    ),
+    "connector_approval_required": (
+        "Le proprietaire du compte doit donner son accord. Le demander dans la "
+        "conversation et attendre sa reponse."
+    ),
+    "connector_cross_user_denied": (
+        "Ce connecteur ne sert que son proprietaire : l'action demandee par une "
+        "autre personne est refusee. Ne pas insister."
+    ),
+    "connector_reauth_required": (
+        "Le compte doit etre reconnecte par son proprietaire. L'en informer ; "
+        "reessayer est inutile jusque-la."
+    ),
+    "connector_rate_limited": (
+        "Plafond d'actions atteint. Attendre avant de reessayer."
+    ),
+    "connector_invalid_params": (
+        "Parametres refuses par le serveur. Corriger l'appel d'apres le detail "
+        "renvoye plutot que de reessayer a l'identique."
+    ),
+    "connector_scope_missing": (
+        "Le compte n'a pas consenti aux droits necessaires. L'utilisateur doit "
+        "les accorder en reconnectant son compte."
+    ),
+}
+
+
+class ConnectorCapabilityError(ValueError):
+    """Capacite refusee avant meme l'appel reseau."""
+
+
+def normalize_capability(raw: Any) -> str:
+    """Valide une capacite contre la liste blanche et la renvoie.
+
+    Refuse (plutot que de « corriger » en silence) : type invalide, capacite
+    absente du catalogue. Une capacite devinee ou reecrite ferait agir l'agent
+    autrement qu'il ne le croit.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        raise ConnectorCapabilityError("capacite vide")
+    capability = raw.strip()
+    # `in` sur un dict Python ne remonte pas de chaine de prototypes, mais on
+    # reste explicite : seule une cle du catalogue passe.
+    if capability not in CONNECTOR_CAPABILITIES:
+        known = ", ".join(sorted(CONNECTOR_CAPABILITIES))
+        raise ConnectorCapabilityError(
+            "capacite inconnue: %s (connues: %s)" % (capability, known)
+        )
+    return capability
+
+
+def has_side_effect(capability: str) -> bool:
+    """La capacite a-t-elle un effet hors du produit ? Inconnue ⇒ ``True``.
+
+    Le repli est VOLONTAIREMENT le plus prudent : traiter une capacite inconnue
+    comme sans effet de bord la ferait passer sous le radar des approbations.
+    """
+    return CONNECTOR_CAPABILITIES.get(capability, True)
+
+
+def connector_url(base_url: str, capability: str) -> str:
+    """URL d'appel d'une capacite. Valide la capacite au passage."""
+    normalized = normalize_capability(capability)
+    return "%s/api/agent/connectors/%s" % (
+        base_url.rstrip("/"),
+        quote(normalized, safe=""),
+    )
+
+
+def build_connector_payload(
+    channel_slug: str,
+    params: Optional[Dict[str, Any]] = None,
+    on_behalf_of: Optional[str] = None,
+    grant_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Construit le POST sortant. PURE — aucune I/O.
+
+    ``on_behalf_of`` et ``grant_id`` sont OMIS quand ils sont vides, plutot que
+    posés à ``None`` : le serveur distingue « non precise » (il resout, et refuse
+    si c'est ambigu) de « precise », et une cle nulle sur le fil brouillerait
+    cette distinction.
+    """
+    payload: Dict[str, Any] = {
+        "channelSlug": channel_slug,
+        "params": params if isinstance(params, dict) else {},
+    }
+    if on_behalf_of:
+        payload["onBehalfOf"] = on_behalf_of
+    if grant_id:
+        payload["grantId"] = grant_id
+    return payload
+
+
+def parse_connector_error(status: int, body: Any) -> Dict[str, Any]:
+    """Traduit une reponse d'erreur en dict exploitable par l'agent.
+
+    Renvoie toujours la MEME forme, avec ``granted`` absent et ``retryable``
+    explicite : un appelant qui teste ``if result:`` ne doit jamais pouvoir
+    confondre un echec avec une autorisation.
+
+    ``ambiguous_options`` est renseigne pour le seul cas ou l'agent a quelque
+    chose a faire de la liste : demander a l'humain lequel de ses comptes
+    utiliser.
+    """
+    code = None
+    message = None
+    options = None
+    if isinstance(body, dict):
+        data = body.get("data")
+        if isinstance(data, dict):
+            code = data.get("code")
+            raw_options = data.get("options")
+            if isinstance(raw_options, list):
+                options = [o for o in raw_options if isinstance(o, dict)]
+        message = body.get("statusMessage") or body.get("message")
+
+    return {
+        "ok": False,
+        "status": status,
+        "code": code if isinstance(code, str) else "connector_error",
+        "message": message if isinstance(message, str) else "appel de connecteur refuse",
+        "hint": CONNECTOR_ERROR_HINTS.get(code or "", ""),
+        # 429 et 5xx valent une nouvelle tentative plus tard ; un refus de
+        # delegation ou d'approbation, jamais — insister ne changerait rien et
+        # remplirait le journal d'audit de refus identiques.
+        "retryable": status == 429 or status >= 500,
+        "ambiguous_options": options or [],
+    }

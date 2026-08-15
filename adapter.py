@@ -59,6 +59,12 @@ from .audio_stream import (
     end_frame,
 )
 from .capabilities import collect_capabilities
+from .connectors import (
+    ConnectorCapabilityError,
+    build_connector_payload,
+    connector_url,
+    parse_connector_error,
+)
 from .vault import vault_url
 from .voice import (
     MAX_VOICE_BYTES,
@@ -261,6 +267,24 @@ class PulseChatAdapter(BasePlatformAdapter):
         ).rstrip("/")
         self.token: str = _get_secret("PULSE_CHAT_TOKEN") or extra.get("token", "")
 
+        # Secret PAR AGENT (`pca_...`), prioritaire sur le jeton de service pour
+        # l'authentification du WebSocket. C'est lui qui rend l'identite annoncee
+        # au `hello` VERIFIABLE : le jeton de service, unique pour toute
+        # l'instance, permet a n'importe quel porteur d'annoncer le profil d'un
+        # autre client. Sans ce secret, la session reste en regime `declared` et
+        # les connecteurs tiers sont refuses (403 agent_credential_required).
+        #
+        # Absent ⇒ repli sur le jeton de service avec un avertissement, JAMAIS un
+        # echec : un plugin deja deploye doit continuer a fonctionner.
+        self.agent_token: str = (
+            _get_secret("PULSE_CHAT_AGENT_TOKEN") or extra.get("agent_token", "")
+        )
+        if not self.agent_token:
+            logger.warning(
+                "Pulse Chat: PULSE_CHAT_AGENT_TOKEN absent — identite auto-declaree "
+                "(regime `declared`). Les connecteurs tiers seront refuses."
+            )
+
         # Profils Hermes servis par ce bot + identite annoncee (frame hello).
         self.profiles: List[str] = parse_profiles(
             _get_secret("PULSE_CHAT_PROFILE") or extra.get("profile", "")
@@ -391,7 +415,12 @@ class PulseChatAdapter(BasePlatformAdapter):
             return False
 
         url = _ws_url(self.base_url)
-        headers = {"Authorization": f"Bearer {self.token}"}
+        # Secret PAR AGENT si disponible, sinon jeton de service. Le serveur
+        # distingue les deux au prefixe (`pca_`) et emet une session `verified`
+        # dans le premier cas, `declared` dans le second. L'en-tete HTTP, lui,
+        # reste toujours sur le jeton de service : le credential authentifie la
+        # CONNEXION, la session transporte l'identite jusqu'aux appels HTTP.
+        headers = {"Authorization": f"Bearer {self.agent_token or self.token}"}
         try:
             # websockets >= 14 : ``additional_headers`` ; anciennes versions
             # (legacy) : ``extra_headers``. On tente le nom moderne d'abord.
@@ -1147,6 +1176,74 @@ class PulseChatAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("Pulse Chat: coffre %s en echec — %s", method, exc)
         return None
+
+    # ── Connecteurs tiers (Outlook, Teams, agenda) ───────────────────────
+
+    async def call_connector(
+        self,
+        chat_id: str,
+        capability: str,
+        params: Optional[Dict[str, Any]] = None,
+        on_behalf_of: Optional[str] = None,
+        grant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Appelle une capacite de connecteur via l'app.
+
+        Le plugin ne connait AUCUN identifiant OAuth, aucun scope, aucune URL
+        Microsoft : il demande une capacite, l'app choisit le compte, resout le
+        jeton et audite. Meme principe que le coffre-fort.
+
+        Renvoie toujours un dict. En cas de succes : ``{"ok": True, ...}``. En cas
+        d'echec : la forme de ``parse_connector_error``, avec ``ok`` a ``False``,
+        un ``hint`` actionnable et ``retryable``. Aucune exception ne remonte —
+        un connecteur en echec ne doit pas faire tomber le tour de parole.
+
+        ⚠️ Sur ``connector_grant_ambiguous``, l'agent doit DEMANDER a l'humain
+        lequel de ses comptes utiliser, puis rappeler avec ``grant_id``. Choisir
+        soi-meme enverrait un courriel depuis la mauvaise boite.
+        """
+        try:
+            url = connector_url(self.base_url, capability)
+        except ConnectorCapabilityError as exc:
+            # Refuse localement : inutile d'aller au reseau pour une capacite
+            # que le serveur rejettera de toute facon.
+            return {
+                "ok": False,
+                "status": 400,
+                "code": "connector_unknown_capability",
+                "message": str(exc),
+                "hint": "Utiliser une capacite du catalogue.",
+                "retryable": False,
+                "ambiguous_options": [],
+            }
+
+        payload = build_connector_payload(chat_id, params, on_behalf_of, grant_id)
+        return await asyncio.to_thread(self._connector_request, url, payload)
+
+    def _connector_request(self, url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Appel HTTP d'un connecteur (bloquant — via ``asyncio.to_thread``)."""
+        body = json.dumps(payload).encode("utf-8")
+        headers = self._auth_headers({"Content-Type": "application/json"})
+        request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT) as response:
+                raw = response.read()
+            parsed = json.loads(raw.decode("utf-8")) if raw else {}
+            return {"ok": True, **(parsed if isinstance(parsed, dict) else {"data": parsed})}
+        except urllib.error.HTTPError as exc:
+            detail: Any = None
+            try:
+                detail = json.loads(exc.read().decode("utf-8"))
+            except Exception:
+                detail = None
+            result = parse_connector_error(exc.code, detail)
+            logger.warning(
+                "Pulse Chat: connecteur -> HTTP %s (%s)", exc.code, result["code"]
+            )
+            return result
+        except Exception as exc:
+            logger.warning("Pulse Chat: connecteur en echec — %s", exc)
+            return parse_connector_error(0, None)
 
     # ── Approbations d'actions sensibles ─────────────────────────────────
 
