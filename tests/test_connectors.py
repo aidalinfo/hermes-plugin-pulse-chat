@@ -114,8 +114,20 @@ class TestParseConnectorError:
 
     def test_un_refus_de_delegation_n_est_pas_retentable(self):
         # Insister ne changerait rien et remplirait le journal de refus identiques.
-        for code in ("connector_no_grant", "connector_approval_required"):
+        for code in (
+            "connector_no_grant",
+            "connector_approval_required",
+            "connector_not_activated",
+        ):
             assert parse_connector_error(403, {"data": {"code": code}})["retryable"] is False
+
+    def test_un_outil_eteint_dit_ou_l_humain_doit_cliquer(self):
+        # « Pas de delegation » et « delegation eteinte dans ce fil » demandent
+        # deux gestes DIFFERENTS a l'humain : accorder, ou allumer. Un conseil
+        # qui les confond envoie l'utilisateur au mauvais ecran.
+        result = parse_connector_error(403, {"data": {"code": "connector_not_activated"}})
+        assert "allume" in result["hint"]
+        assert "CETTE" in result["hint"]
 
     def test_un_quota_ou_une_panne_est_retentable(self):
         assert parse_connector_error(429, {})["retryable"] is True
