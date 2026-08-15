@@ -130,6 +130,43 @@ _SESSION_HEADER = "x-hermes-session"
 DEFAULT_SAMPLE_RATE = 24000
 _AUDIO_STREAMS_MAX = 8
 
+#: Le streamer Voxtral a-t-il fini par s'enregistrer ? `None` = pas encore su.
+_voxtral_registered: Optional[bool] = None
+
+
+def _ensure_voxtral_streamer() -> bool:
+    """Enregistre le streamer Voxtral s'il ne l'est pas deja. Idempotent.
+
+    L'enregistrement a lieu normalement a l'import du plugin (`__init__.py`).
+    Il peut echouer pour une raison qui n'a rien de definitif : le contrat de
+    streaming (`tools.tts_streaming`) n'etait pas encore importable a cet
+    instant. Le symptome est alors invisible et couteux — Hermes ouvre une
+    piste audio, ne trouve aucun fournisseur pour la remplir, et la referme
+    sans un octet. Vu en production.
+
+    On retente donc UNE FOIS au premier tour parle, et on journalise le
+    resultat : un silence de plus a cet endroit ne serait pas acceptable.
+    """
+    global _voxtral_registered
+    if _voxtral_registered:
+        return True
+    try:
+        from .voxtral_streaming import install as _install
+
+        _voxtral_registered = bool(_install())
+    except Exception as exc:
+        _voxtral_registered = False
+        logger.warning("Pulse Chat: enregistrement tardif du streamer en echec — %s", exc)
+        return False
+    if _voxtral_registered:
+        logger.info("Pulse Chat: streamer TTS Voxtral enregistre (tentative tardive)")
+    else:
+        logger.warning(
+            "Pulse Chat: streamer TTS Voxtral indisponible — l'agent ouvrira une "
+            "piste audio que rien ne remplira (contrat de streaming absent ?)"
+        )
+    return _voxtral_registered
+
 
 class _AudioStreamHandle(StreamingTTSHandle):
     """``StreamingTTSHandle`` + ce dont le transport a besoin.
@@ -954,6 +991,14 @@ class PulseChatAdapter(BasePlatformAdapter):
         """Ouvre une piste audio. ``None`` = on decline, Hermes replie."""
         if not self.supports_streaming_tts(chat_id, audio_format):
             return None
+
+        # Filet de securite sur l'ORDRE DE CHARGEMENT : si le streamer Voxtral
+        # n'a pas pu s'enregistrer a l'import du plugin (le contrat de streaming
+        # n'etait pas encore importable), Hermes ouvrirait cette piste et
+        # n'aurait aucun fournisseur pour la remplir — une piste ouverte, zero
+        # octet ecrit, fermeture propre. Vu en production. `install()` est
+        # idempotent : le rappeler ici ne coute rien et supprime la fenetre.
+        _ensure_voxtral_streamer()
 
         stream_id = uuid.uuid4().hex
         try:
