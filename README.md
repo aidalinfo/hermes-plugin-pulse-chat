@@ -161,7 +161,9 @@ tts:
   provider: mistral         # Voxtral TTS — clé MISTRAL_API_KEY
   mistral:
     model: voxtral-mini-tts-2603
-    # voice_id: c69964a6-ab8b-4f8a-9465-ec0925096ec8   # Paul – Neutral (défaut)
+    # voice_id: 5a271406-039d-46fe-835b-fbbb00eaf08d   # fr_marie_neutral (défaut)
+    # ⚠️ une voix `en_*` prononce le français avec un accent anglophone :
+    #    le catalogue compte 6 voix `fr_fr` (« Marie »), 24 voix anglaises.
 stt:
   provider: mistral         # Voxtral Transcribe — même clé
   language: fr
