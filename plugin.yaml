@@ -22,6 +22,16 @@ requires_env:
     password: true
 
 optional_env:
+  - name: PULSE_CHAT_AGENT_TOKEN
+    description: >
+      Secret PAR AGENT (pca_...), emis dans Pulse Chat. Prioritaire sur
+      PULSE_CHAT_TOKEN pour l'authentification du WebSocket : il rend l'identite
+      annoncee verifiable, la ou le token de service — unique pour toute
+      l'instance — permet a n'importe quel porteur d'annoncer le profil d'un
+      autre client. REQUIS pour les connecteurs tiers (Outlook, Teams, agenda) ;
+      sans lui, la session reste auto-declaree et ces appels sont refuses.
+    prompt: "Secret d'agent Pulse Chat (pca_... — ou vide)"
+    password: true
   - name: PULSE_CHAT_PROFILE
     description: "Profil(s) Hermes servis par ce bot, separes par des virgules (defaut: default)"
     prompt: "Profils Hermes (separes par des virgules — ou vide pour 'default')"
