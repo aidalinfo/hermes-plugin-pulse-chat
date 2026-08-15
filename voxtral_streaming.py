@@ -43,7 +43,16 @@ logger = logging.getLogger(__name__)
 
 SPEECH_URL = "https://api.mistral.ai/v1/audio/speech"
 DEFAULT_MODEL = "voxtral-mini-tts-2603"
-DEFAULT_VOICE_ID = "c69964a6-ab8b-4f8a-9465-ec0925096ec8"  # Paul - Neutral
+#: Voix par defaut : ``fr_marie_neutral``.
+#:
+#: Le defaut precedent (``en_paul_neutral``) etait une voix ANGLAISE. Le modele
+#: prononce bien le francais avec, mais avec l'accent de la voix — signale en
+#: usage comme « il a un accent quebecois ». Pulse Chat est un produit
+#: francais-d'abord (l'app est en FR par defaut) : son defaut doit l'etre aussi.
+#:
+#: Le catalogue Voxtral compte 6 voix ``fr_fr`` (toutes « Marie », feminines) ;
+#: ``voice_id`` dans la configuration du bot reste prioritaire sur ce defaut.
+DEFAULT_VOICE_ID = "5a271406-039d-46fe-835b-fbbb00eaf08d"  # fr_marie_neutral
 #: Mirrors ``_STREAM_SENTENCE_BYTE_CAP``: one sentence of PCM never approaches
 #: 16 MiB, so exceeding it means a runaway upstream — stop pulling.
 SENTENCE_BYTE_CAP = 16 * 1024 * 1024
