@@ -964,6 +964,9 @@ class PulseChatAdapter(BasePlatformAdapter):
             logger.warning("Pulse Chat: ouverture du flux audio en echec — %s", exc)
             return None
 
+        logger.info(
+            "Pulse Chat: piste audio ouverte (chat=%s, stream=%s)", chat_id, stream_id
+        )
         handle = _AudioStreamHandle(str(chat_id), audio_format, stream_id)
         self._audio_streams[stream_id] = handle
         # Borne de securite : une fin de flux perdue (deconnexion en plein tour)
@@ -996,6 +999,16 @@ class PulseChatAdapter(BasePlatformAdapter):
         if handle is None:
             return
         stream_id = getattr(handle, "stream_id", "")
+        # Compte des morceaux REELLEMENT ecrits. `0` dit que le consumer a ouvert
+        # une piste et n'a rien synthetise — la panne la plus difficile a voir,
+        # et celle qu'on a passe une soiree a chercher : cote app, le tour
+        # s'ouvrait et se fermait proprement, sans un octet entre les deux.
+        logger.info(
+            "Pulse Chat: piste audio fermee (stream=%s, morceaux=%s, interrompu=%s)",
+            stream_id,
+            getattr(handle, "seq", 0),
+            interrupted,
+        )
         self._audio_streams.pop(stream_id, None)
         if self._ws is None:
             return
