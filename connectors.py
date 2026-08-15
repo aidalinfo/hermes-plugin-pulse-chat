@@ -46,6 +46,11 @@ CONNECTOR_ERROR_HINTS: Dict[str, str] = {
         "Cette action exige un secret d'agent (AgentCredential). Le deploiement "
         "doit definir PULSE_CHAT_AGENT_TOKEN — ne pas reessayer."
     ),
+    "connector_not_activated": (
+        "La delegation existe mais l'outil n'est pas allume dans CETTE "
+        "conversation. Demander a l'humain de l'activer (icone prise du champ "
+        "de saisie) ; inutile de reessayer avant."
+    ),
     "connector_no_grant": (
         "Aucune delegation active ne couvre cette action. Demander a l'utilisateur "
         "d'en accorder une depuis ses reglages, puis reessayer."
