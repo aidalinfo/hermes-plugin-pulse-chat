@@ -86,6 +86,69 @@ class TestBuildApprovalPayload:
         assert payload["reason"] is None
         assert payload["options"] == ["once", "deny"]
 
+    def test_champs_vides_OMIS_et_pas_envoyes_a_null(self):
+        """Compatibilite avec une app anterieure a `summary`/`risks`.
+
+        Le schema d'entree de l'app est `strict()` : envoyer la CLE, meme a
+        `None`, fait repondre `400 Unrecognized keys` a une app ancienne et la
+        demande n'est pas creee. La mise a jour des bots etant manuelle et
+        etalee, ce plugin ne doit pas dependre de l'ordre de deploiement.
+        """
+        payload = approvals.build_approval_payload("demo", "req-4", "sh", "ls")
+        assert "summary" not in payload
+        assert "risks" not in payload
+
+        # Vides « en apparence renseignes » : meme traitement.
+        vide = approvals.build_approval_payload(
+            "demo", "req-5", "sh", "ls", summary="   ", risks=["", "  ", 42]
+        )
+        assert "summary" not in vide
+        assert "risks" not in vide
+
+    def test_champs_renseignes_presents(self):
+        payload = approvals.build_approval_payload(
+            "demo", "req-6", "sh", "ls", summary="Résumé", risks=["Impact"]
+        )
+        assert payload["summary"] == "Résumé"
+        assert payload["risks"] == ["Impact"]
+
+    def test_resume_et_impacts_transportes(self):
+        payload = approvals.build_approval_payload(
+            channel_slug="demo",
+            request_id="req-3",
+            tool="execute_code",
+            command="print(1)",
+            summary="  Installer la cle publique sur atelier-02.  ",
+            risks=["  Acces SSH  ", "", "Ecriture dans ~/.ssh"],
+        )
+        assert payload["summary"] == "Installer la cle publique sur atelier-02."
+        assert payload["risks"] == ["Acces SSH", "Ecriture dans ~/.ssh"]
+
+    def test_resume_vide_vaut_absence(self):
+        # `""`, `"   "` et un non-`str` valent absence : l'app affiche « pas de
+        # resume », elle ne reserve pas une ligne vide dans la carte.
+        assert "summary" not in approvals.build_approval_payload(
+            "d", "r", "sh", "ls", summary="   "
+        )
+        assert "summary" not in approvals.build_approval_payload("d", "r", "sh", "ls", summary=42)
+
+
+class TestNormalizeRisks:
+    def test_ignore_ce_qui_n_est_pas_une_chaine(self):
+        assert approvals.normalize_risks(["ok", 42, None, {"a": 1}, "  "]) == ["ok"]
+
+    def test_borne_le_nombre(self):
+        many = [f"impact {i}" for i in range(approvals.MAX_RISKS + 5)]
+        assert len(approvals.normalize_risks(many)) == approvals.MAX_RISKS
+
+    def test_borne_la_longueur(self):
+        [only] = approvals.normalize_risks(["x" * (approvals.MAX_RISK_LENGTH + 50)])
+        assert len(only) == approvals.MAX_RISK_LENGTH
+
+    def test_absence_donne_liste_vide(self):
+        assert approvals.normalize_risks(None) == []
+        assert approvals.normalize_risks([]) == []
+
 
 def _reply(**approval):
     base = {

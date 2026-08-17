@@ -1359,6 +1359,8 @@ class PulseChatAdapter(BasePlatformAdapter):
         options: Optional[List[str]] = None,
         timeout: Optional[float] = None,
         request_id: Optional[str] = None,
+        summary: Optional[str] = None,
+        risks: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Soumet une action sensible a l'approbation humaine et ATTEND la reponse.
 
@@ -1370,7 +1372,15 @@ class PulseChatAdapter(BasePlatformAdapter):
         puisse ressembler a une autorisation.
 
         L'attente survit a une coupure du WebSocket : la decision prise
-        pendant la coupure est rejouee par l'app a la reconnexion (hello).
+        pendant la coupure est rejouee par l'app a la reconnexion (hello). Une
+        reemission du meme ``request_id`` sur une demande DEJA tranchee se fait
+        repondre la decision telle quelle — elle ne rouvre rien et ne bloque
+        pas.
+
+        ``summary`` (une phrase : ce que l'agent veut faire) et ``risks`` (ce
+        que ca touche, une ligne par point) sont facultatifs mais ce sont eux
+        que l'humain lit avant de cliquer : un script de trente lignes ne se
+        lit pas, une liste de trois impacts si.
         """
         request_id = request_id or f"req-{uuid.uuid4().hex}"
         payload = build_approval_payload(
@@ -1380,6 +1390,8 @@ class PulseChatAdapter(BasePlatformAdapter):
             command=command,
             reason=reason,
             options=options,
+            summary=summary,
+            risks=risks,
         )
 
         loop = asyncio.get_running_loop()
