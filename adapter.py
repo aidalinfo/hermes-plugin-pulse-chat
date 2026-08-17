@@ -44,7 +44,13 @@ import uuid
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
-from .approvals import build_approval_payload, parse_approval_reply, refusal
+from .approvals import (
+    GATEWAY_APPROVAL_TOOL,
+    build_approval_payload,
+    gateway_options,
+    parse_approval_reply,
+    refusal,
+)
 from .artifacts import (
     build_artifact_payload,
     default_artifact_id,
@@ -108,7 +114,21 @@ except ImportError:  # pragma: no cover - Hermes anterieur au contrat
 
     _HAS_STREAMING_CONTRACT = False
 
+try:  # File d'attente du garde-fou d'Hermes (approbation de commande dangereuse)
+    from tools.approval import resolve_gateway_approval
+except ImportError:  # pragma: no cover - Hermes trop ancien / hors gateway
+    # Import GARDE et non dur : sans lui, tout l'import du plugin echouerait et
+    # le bot perdrait le chat entier pour une fonction d'appoint. L'absence est
+    # traitee dans ``send_exec_approval``, qui rend alors la main a Hermes pour
+    # qu'il reprenne son invite texte — cf. le commentaire la-bas.
+    resolve_gateway_approval = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
+
+#: Correlations ``requestId -> session_key`` retenues en attendant la decision.
+#: Bornee : le garde-fou d'Hermes abandonne au bout de son propre delai (300 s
+#: par defaut) et la trame correspondante n'arrivera parfois jamais.
+_MAX_GATEWAY_APPROVALS = 100
 
 _HTTP_TIMEOUT = 15.0
 _WS_CONNECT_TIMEOUT = 30.0
@@ -362,6 +382,11 @@ class PulseChatAdapter(BasePlatformAdapter):
         # ``approval.reply``. Elles SURVIVENT a une coupure WS : l'app rejoue
         # les decisions non livrees au prochain hello.
         self._pending_approvals: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
+        # Approbations issues du GARDE-FOU d'Hermes : requestId -> session_key.
+        # Rien a debloquer ici — c'est Hermes qui tient le thread agent bloque,
+        # et c'est ``resolve_gateway_approval`` qui le relache. On ne garde donc
+        # que de quoi retrouver la session au retour de la decision.
+        self._gateway_approvals: "OrderedDict[str, str]" = OrderedDict()
 
     @property
     def name(self) -> str:
@@ -1419,11 +1444,100 @@ class PulseChatAdapter(BasePlatformAdapter):
         finally:
             self._pending_approvals.pop(request_id, None)
 
+    async def send_exec_approval(
+        self,
+        chat_id: str,
+        command: str,
+        session_key: str,
+        description: str = "dangerous command",
+        metadata: Optional[Dict[str, Any]] = None,
+        allow_permanent: bool = True,
+        allow_session: bool = True,
+        smart_denied: bool = False,
+    ) -> SendResult:
+        """Rend le garde-fou d'Hermes sous forme de CARTE, pas d'invite texte.
+
+        Point d'extension du gateway (``gateway/run.py``) : il regarde si la
+        CLASSE de l'adaptateur definit cette methode. Sans elle, il retombe sur
+        un message texte « tapez /approve » — lisible sur Telegram, absurde ici,
+        ou l'app a une carte a boutons et une table ``approvalRequest``. C'est
+        exactement ce qui se passait : la chaine d'approbation cote app etait
+        intacte et n'etait jamais sollicitee.
+
+        Elle POSTE et rend la main — elle n'attend PAS la decision, a l'inverse
+        de ``request_approval()``. Hermes borne cet envoi a 15 s puis bloque le
+        thread agent de son cote ; c'est ``resolve_gateway_approval`` qui le
+        relache, depuis ``_handle_approval_reply``.
+
+        Tout echec est rendu en ``SendResult(success=False)`` plutot qu'en
+        exception : Hermes reprend alors SON invite texte. C'est la seule
+        degradation acceptable — se taire laisserait l'humain devant un agent
+        muet jusqu'a l'expiration du garde-fou.
+        """
+        if resolve_gateway_approval is None:
+            # Poster la carte sans pouvoir debloquer le thread agent serait pire
+            # que l'invite texte : des boutons sans effet, et l'agent fige
+            # jusqu'au delai du garde-fou.
+            return SendResult(
+                success=False,
+                error="tools.approval indisponible — pas de deblocage possible",
+            )
+
+        command = command or description or "(commande non transmise)"
+        request_id = f"req-{uuid.uuid4().hex}"
+        payload = build_approval_payload(
+            channel_slug=str(chat_id),
+            request_id=request_id,
+            tool=GATEWAY_APPROVAL_TOOL,
+            command=command,
+            reason=description,
+            options=gateway_options(
+                allow_permanent=allow_permanent,
+                allow_session=allow_session,
+                smart_denied=smart_denied,
+            ),
+        )
+        # Correle AVANT de poster : l'app peut repondre avant que le POST ne
+        # retourne (demande deja tranchee, rejouee telle quelle) et la trame
+        # arriverait sans destinataire.
+        self._gateway_approvals[request_id] = str(session_key)
+        while len(self._gateway_approvals) > _MAX_GATEWAY_APPROVALS:
+            self._gateway_approvals.popitem(last=False)
+
+        result = await self._post_agent_message(payload, request_id)
+        if not result.success:
+            self._gateway_approvals.pop(request_id, None)
+            logger.warning(
+                "Pulse Chat: carte d'approbation non postee (%s) — %s ; "
+                "Hermes reprend l'invite texte",
+                request_id,
+                getattr(result, "error", None),
+            )
+        return result
+
     def _handle_approval_reply(self, data: Dict[str, Any]) -> None:
         """Trame ``approval.reply`` -> resolution de l'attente correspondante."""
         reply = parse_approval_reply(data)
         if reply is None:
             logger.warning("Pulse Chat: trame approval.reply inexploitable ignoree")
+            return
+        # Deux origines possibles, jamais les deux pour un meme requestId : le
+        # garde-fou du gateway (l'attente vit chez Hermes) ou un appel explicite
+        # a ``request_approval`` (l'attente vit ici).
+        session_key = self._gateway_approvals.pop(reply["requestId"], None)
+        if session_key is not None:
+            resolved = resolve_gateway_approval(session_key, reply["decision"])
+            if not resolved:
+                # Le garde-fou d'Hermes a son propre delai (300 s par defaut) :
+                # passe ce delai il a deja refuse, et le clic arrive trop tard.
+                # On le trace plutot que de le taire — c'est la seule trace
+                # qu'un humain a bien tranche, mais apres la fin.
+                logger.info(
+                    "Pulse Chat: decision %s pour %s sans attente cote Hermes "
+                    "(garde-fou deja expire)",
+                    reply["decision"],
+                    reply["requestId"],
+                )
             return
         future = self._pending_approvals.get(reply["requestId"])
         if future is None:

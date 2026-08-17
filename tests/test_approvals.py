@@ -61,6 +61,44 @@ class TestNormalizeOptions:
         assert "deny" in approvals.normalize_options(["always"])
 
 
+class TestGatewayOptions:
+    """Permissions du garde-fou Hermes -> boutons de la carte."""
+
+    def test_tout_permis(self):
+        assert approvals.gateway_options() == ["once", "session", "always", "deny"]
+
+    def test_sans_permanent(self):
+        assert approvals.gateway_options(allow_permanent=False) == [
+            "once",
+            "session",
+            "deny",
+        ]
+
+    def test_sans_session_retire_aussi_always(self):
+        """``always`` sans ``session`` n'existe pas — meme regle que Teams."""
+        assert approvals.gateway_options(allow_session=False) == ["once", "deny"]
+
+    def test_smart_deny_ne_propose_que_once(self):
+        """Une derogation vaut pour UNE operation.
+
+        Proposer `session`/`always` ferait accorder d'un clic une autorisation
+        qu'Hermes a deja jugee trop large : la carte serait plus permissive que
+        le garde-fou qu'elle sert.
+        """
+        assert approvals.gateway_options(smart_denied=True) == ["once", "deny"]
+        assert approvals.gateway_options(
+            allow_permanent=True, allow_session=True, smart_denied=True
+        ) == ["once", "deny"]
+
+    def test_toujours_une_issue_negative(self):
+        for options in (
+            approvals.gateway_options(),
+            approvals.gateway_options(allow_session=False),
+            approvals.gateway_options(smart_denied=True),
+        ):
+            assert "deny" in options
+
+
 class TestBuildApprovalPayload:
     def test_forme_du_payload(self):
         payload = approvals.build_approval_payload(
@@ -111,6 +149,22 @@ class TestBuildApprovalPayload:
         )
         assert payload["summary"] == "Résumé"
         assert payload["risks"] == ["Impact"]
+
+    def test_reason_bornee_mais_command_intacte(self):
+        """Couper le motif est benin ; couper la commande ne l'est pas.
+
+        Un script tronque ferait approuver a un humain ce qu'il ne voit pas. On
+        prefere le refus de l'app — visible — a l'approbation aveugle.
+        """
+        payload = approvals.build_approval_payload(
+            "demo",
+            "req-7",
+            "sh",
+            "x" * 30_000,
+            reason="r" * 5_000,
+        )
+        assert len(payload["reason"]) == approvals.MAX_REASON_LENGTH
+        assert len(payload["command"]) == 30_000
 
     def test_resume_et_impacts_transportes(self):
         payload = approvals.build_approval_payload(

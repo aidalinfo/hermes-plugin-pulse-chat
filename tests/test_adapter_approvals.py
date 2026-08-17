@@ -52,6 +52,188 @@ async def _settle():
     await asyncio.sleep(0)
 
 
+def _capture_resolutions(monkeypatch):
+    """Remplace ``resolve_gateway_approval`` (absent hors d'Hermes) par un espion.
+
+    Il rend le nombre d'attentes debloquees, comme le vrai : ``0`` signifie que
+    le garde-fou d'Hermes a deja expire.
+    """
+    resolutions = []
+
+    def fake_resolve(session_key, choice, resolve_all=False, reason=None):
+        resolutions.append((session_key, choice))
+        return 1
+
+    monkeypatch.setattr(adapter_module, "resolve_gateway_approval", fake_resolve)
+    return resolutions
+
+
+class TestSendExecApproval:
+    """Le garde-fou d'Hermes doit produire une CARTE, pas une invite texte.
+
+    Hermes teste ``getattr(type(adapter), "send_exec_approval")`` : sans cette
+    methode il poste « tapez /approve » et aucune ligne `approvalRequest` n'est
+    jamais creee — c'est exactement ce qu'on a constate en production.
+    """
+
+    def test_la_methode_existe_sur_la_CLASSE(self):
+        # Hermes interroge la classe, pas l'instance (il se protege des mocks).
+        assert getattr(adapter_module.PulseChatAdapter, "send_exec_approval", None)
+
+    def test_poste_une_carte_et_rend_la_main_sans_attendre(self, monkeypatch):
+        async def run():
+            _capture_resolutions(monkeypatch)
+            adapter, posted = _make_adapter()
+
+            # Ne DOIT pas bloquer : Hermes borne cet envoi a 15 s puis tient le
+            # thread agent de son cote.
+            result = await asyncio.wait_for(
+                adapter.send_exec_approval(
+                    chat_id="demo",
+                    command="rm -rf /var/tmp/cache",
+                    session_key="sess-1",
+                    description="Security scan — dotfile overwrite",
+                ),
+                timeout=1,
+            )
+
+            assert result.success is True
+            assert len(posted) == 1
+            assert posted[0]["kind"] == "approval_request"
+            assert posted[0]["channelSlug"] == "demo"
+            assert posted[0]["command"] == "rm -rf /var/tmp/cache"
+            assert posted[0]["reason"] == "Security scan — dotfile overwrite"
+            assert posted[0]["options"] == ["once", "session", "always", "deny"]
+
+        asyncio.run(run())
+
+    def test_la_decision_debloque_le_thread_agent_dHermes(self, monkeypatch):
+        async def run():
+            resolutions = _capture_resolutions(monkeypatch)
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(
+                chat_id="demo", command="ls", session_key="sess-42"
+            )
+            request_id = posted[0]["requestId"]
+
+            adapter._handle_approval_reply(_reply_frame(request_id, "session"))
+
+            assert resolutions == [("sess-42", "session")]
+            # Correlation consommee : un rejeu ne debloque pas deux fois.
+            assert adapter._gateway_approvals == {}
+
+        asyncio.run(run())
+
+    def test_deny_est_transmis_tel_quel(self, monkeypatch):
+        async def run():
+            resolutions = _capture_resolutions(monkeypatch)
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(
+                chat_id="demo", command="ls", session_key="sess-9"
+            )
+            adapter._handle_approval_reply(
+                _reply_frame(posted[0]["requestId"], "deny")
+            )
+            assert resolutions == [("sess-9", "deny")]
+
+        asyncio.run(run())
+
+    def test_smart_deny_ne_propose_que_once(self, monkeypatch):
+        async def run():
+            _capture_resolutions(monkeypatch)
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(
+                chat_id="demo",
+                command="ls",
+                session_key="sess-2",
+                smart_denied=True,
+            )
+            assert posted[0]["options"] == ["once", "deny"]
+
+        asyncio.run(run())
+
+    def test_post_en_echec_rend_la_main_a_linvite_texte(self, monkeypatch):
+        """``success=False`` fait reprendre a Hermes son message texte.
+
+        C'est la seule degradation acceptable : lever une exception ou se taire
+        laisserait l'humain devant un agent muet jusqu'a l'expiration du garde.
+        """
+
+        async def run():
+            _capture_resolutions(monkeypatch)
+            adapter, _ = _make_adapter(post_ok=False)
+            result = await adapter.send_exec_approval(
+                chat_id="demo", command="ls", session_key="sess-3"
+            )
+            assert result.success is False
+            # Correlation retiree : la carte n'existe pas, la decision non plus.
+            assert adapter._gateway_approvals == {}
+
+        asyncio.run(run())
+
+    def test_sans_tools_approval_on_refuse_de_poster_la_carte(self, monkeypatch):
+        """Des boutons sans deblocage seraient pires que l'invite texte."""
+
+        async def run():
+            monkeypatch.setattr(adapter_module, "resolve_gateway_approval", None)
+            adapter, posted = _make_adapter()
+            result = await adapter.send_exec_approval(
+                chat_id="demo", command="ls", session_key="sess-4"
+            )
+            assert result.success is False
+            assert posted == []
+
+        asyncio.run(run())
+
+    def test_garde_fou_expire_ne_leve_pas(self, monkeypatch):
+        """Un clic arrive apres le delai d'Hermes : trace, jamais d'exception."""
+
+        async def run():
+            def fake_resolve(session_key, choice, resolve_all=False, reason=None):
+                return 0  # plus rien en attente cote Hermes
+
+            monkeypatch.setattr(
+                adapter_module, "resolve_gateway_approval", fake_resolve
+            )
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(
+                chat_id="demo", command="ls", session_key="sess-5"
+            )
+            adapter._handle_approval_reply(_reply_frame(posted[0]["requestId"]))
+            assert adapter._gateway_approvals == {}
+
+        asyncio.run(run())
+
+    def test_les_deux_chemins_ne_se_marchent_pas_dessus(self, monkeypatch):
+        """``request_approval`` attend ici ; le garde-fou attend chez Hermes."""
+
+        async def run():
+            resolutions = _capture_resolutions(monkeypatch)
+            adapter, posted = _make_adapter()
+
+            task = asyncio.create_task(
+                adapter.request_approval(chat_id="demo", tool="sh", command="ls")
+            )
+            await _settle()
+            explicite = posted[0]["requestId"]
+
+            await adapter.send_exec_approval(
+                chat_id="demo", command="whoami", session_key="sess-6"
+            )
+            garde = posted[1]["requestId"]
+
+            adapter._handle_approval_reply(_reply_frame(garde, "once"))
+            assert resolutions == [("sess-6", "once")]
+            assert not task.done()  # l'attente explicite est intacte
+
+            adapter._handle_approval_reply(_reply_frame(explicite, "deny"))
+            result = await asyncio.wait_for(task, timeout=1)
+            assert result["granted"] is False
+            assert resolutions == [("sess-6", "once")]
+
+        asyncio.run(run())
+
+
 def test_request_approval_attend_la_reponse():
     async def run():
         adapter, posted = _make_adapter()
