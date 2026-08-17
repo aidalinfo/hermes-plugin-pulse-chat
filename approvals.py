@@ -47,12 +47,45 @@ def normalize_options(options: Optional[Iterable[Any]]) -> List[str]:
     return ordered
 
 
+#: Nom d'outil porte par une demande issue du GARDE-FOU du gateway Hermes.
+#: ``send_exec_approval`` ne recoit que la commande et son motif — Hermes ne dit
+#: pas QUEL outil a declenche le garde. On nomme donc la surface plutot que
+#: d'inventer une capacite (``execute_code``) qui serait fausse une fois sur
+#: deux : la pastille de la carte doit decrire ce qui est vrai.
+GATEWAY_APPROVAL_TOOL = "command"
+
+
+def gateway_options(
+    allow_permanent: bool = True,
+    allow_session: bool = True,
+    smart_denied: bool = False,
+) -> List[str]:
+    """Traduit les permissions du garde-fou Hermes en options de la carte.
+
+    Miroir exact de ce que font les autres adaptateurs (Teams, Slack, Discord) :
+    ``always`` n'est propose qu'AVEC ``session``, et un ``smart_denied`` — une
+    derogation du proprietaire pour UNE operation — n'ouvre ni l'un ni l'autre.
+    Proposer plus large ici ferait accorder d'un clic une autorisation qu'Hermes
+    a deja jugee trop large ; la carte serait alors plus permissive que le
+    garde-fou qu'elle sert.
+    """
+    if smart_denied:
+        return list(DEFAULT_APPROVAL_OPTIONS)
+    options = ["once"]
+    if allow_session:
+        options.append("session")
+        if allow_permanent:
+            options.append("always")
+    return normalize_options(options)
+
+
 #: Bornes des champs d'affichage (miroir de shared/approvals.ts). L'app refait
 #: ce bornage de son cote : le faire ici evite d'envoyer pour rien ce qu'elle
 #: coupera.
 MAX_RISKS = 8
 MAX_RISK_LENGTH = 200
 MAX_SUMMARY_LENGTH = 400
+MAX_REASON_LENGTH = 2000
 
 
 def normalize_risks(risks: Optional[Iterable[Any]]) -> List[str]:
@@ -97,6 +130,11 @@ def build_approval_payload(
     approbations. En omettant, ce plugin reste compatible avec les deux
     versions, et l'ordre de deploiement redevient sans importance. Meme parti
     pris que ``emitterProfile``, que ce plugin n'envoie jamais.
+
+    ``reason`` est borne (texte d'affichage, le couper est benin). ``command``
+    ne l'est PAS, volontairement : une commande tronquee ferait approuver a un
+    humain un script dont il ne voit pas la fin. Trop longue, elle se fait
+    refuser par l'app — un refus visible vaut mieux qu'une approbation aveugle.
     """
     trimmed_summary = summary.strip()[:MAX_SUMMARY_LENGTH] if isinstance(summary, str) else ""
     cleaned_risks = normalize_risks(risks)
@@ -106,7 +144,7 @@ def build_approval_payload(
         "requestId": request_id,
         "tool": tool,
         "command": command,
-        "reason": reason,
+        "reason": reason[:MAX_REASON_LENGTH] if isinstance(reason, str) else reason,
         "options": normalize_options(options),
     }
     if trimmed_summary:
