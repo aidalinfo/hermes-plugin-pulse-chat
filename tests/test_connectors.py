@@ -49,6 +49,13 @@ class TestSideEffect:
         for capability in ("mail.send", "calendar.write", "teams.post"):
             assert has_side_effect(capability) is True
 
+    def test_les_taches_suivent_la_regle_du_brouillon_sauf_la_suppression(self):
+        # Une tache creee reste dans l'espace du delegant : rien a approuver.
+        assert has_side_effect("tasks.read") is False
+        assert has_side_effect("tasks.write") is False
+        # To Do n'a pas de corbeille : la suppression est irreversible.
+        assert has_side_effect("tasks.delete") is True
+
     def test_une_capacite_inconnue_est_traitee_comme_dangereuse(self):
         # Repli le plus PRUDENT : la traiter comme sans effet de bord la ferait
         # passer sous le radar des approbations.
