@@ -35,6 +35,14 @@ CONNECTOR_CAPABILITIES: Dict[str, bool] = {
     "mail.send": True,
     "calendar.read": False,
     "calendar.write": True,
+    # Taches Microsoft To Do. ``tasks.write`` couvre creation ET modification
+    # (dont cocher « termine », qui est un changement de statut) : la capacite est
+    # l'unite d'AUTORITE, l'action vit dans les parametres. Sans effet de bord,
+    # pour la raison de ``mail.draft`` : la tache reste dans l'espace du delegant.
+    "tasks.read": False,
+    "tasks.write": False,
+    # La SUPPRESSION est a part, et a effet de bord : To Do n'a pas de corbeille.
+    "tasks.delete": True,
     "teams.post": True,
 }
 
@@ -58,6 +66,11 @@ CONNECTOR_ERROR_HINTS: Dict[str, str] = {
     "connector_grant_ambiguous": (
         "Plusieurs comptes conviennent. DEMANDER a l'utilisateur lequel utiliser, "
         "puis rappeler avec `grantId`. Ne jamais choisir soi-meme."
+    ),
+    "connector_ambiguous_target": (
+        "Plusieurs objets du compte repondent a la designation donnee (deux listes "
+        "de taches du meme nom, par exemple). DEMANDER a l'humain lequel, ou "
+        "reprendre l'identifiant rendu par la lecture. Ne pas choisir soi-meme."
     ),
     "connector_approval_required": (
         "Le proprietaire du compte doit donner son accord. Le demander dans la "

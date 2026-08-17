@@ -181,3 +181,64 @@ def test_decision_sans_attente_active_est_ignoree_sans_erreur():
         assert adapter._pending_approvals == {}
 
     asyncio.run(run())
+
+
+def test_resume_et_impacts_partent_dans_le_payload():
+    """Ce que l'humain LIT avant de cliquer doit arriver jusqu'a la carte."""
+
+    async def run():
+        adapter, posted = _make_adapter()
+        task = asyncio.create_task(
+            adapter.request_approval(
+                chat_id="demo",
+                tool="execute_code",
+                command="ssh-copy-id ops@atelier-02",
+                summary="Installer la cle publique sur atelier-02.",
+                risks=["Acces SSH au poste atelier-02", "Ecriture dans ~/.ssh"],
+            )
+        )
+        await _settle()
+
+        assert posted[0]["summary"] == "Installer la cle publique sur atelier-02."
+        assert posted[0]["risks"] == [
+            "Acces SSH au poste atelier-02",
+            "Ecriture dans ~/.ssh",
+        ]
+
+        adapter._handle_approval_reply(_reply_frame(posted[0]["requestId"]))
+        await asyncio.wait_for(task, timeout=1)
+
+    asyncio.run(run())
+
+
+def test_reemission_du_meme_request_id_est_debloquee_par_la_reponse():
+    """Une demande deja tranchee cote app repond a la reemission.
+
+    Le futur est arme AVANT le POST et ``timeout`` vaut None par defaut : si
+    l'app se contentait d'un ``{id}`` muet, cet appel n'aurait aucune issue.
+    Ici on verifie le pendant cote plugin — la reponse a une reemission
+    debloque bien l'attente, avec le meme ``request_id`` impose par l'appelant.
+    """
+
+    async def run():
+        adapter, posted = _make_adapter()
+        task = asyncio.create_task(
+            adapter.request_approval(
+                chat_id="demo",
+                tool="execute_code",
+                command="print(1)",
+                request_id="req-fixe",
+            )
+        )
+        await _settle()
+
+        assert posted[0]["requestId"] == "req-fixe"
+        assert not task.done()
+
+        adapter._handle_approval_reply(_reply_frame("req-fixe", "once"))
+        result = await asyncio.wait_for(task, timeout=1)
+        assert result["granted"] is True
+        assert result["status"] == "decided"
+        assert adapter._pending_approvals == {}
+
+    asyncio.run(run())

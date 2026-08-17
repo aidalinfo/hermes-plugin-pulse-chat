@@ -10,7 +10,7 @@ Contrat (miroir de app/pulse-chat/shared/approvals.ts) :
 
     plugin -> app   POST /api/agent/messages
         {kind: "approval_request", channelSlug, requestId, tool, command,
-         reason, options}
+         summary, reason, risks, options}
 
     app -> plugin   trame WS
         {type: "approval.reply", channel: {...},
@@ -47,6 +47,36 @@ def normalize_options(options: Optional[Iterable[Any]]) -> List[str]:
     return ordered
 
 
+#: Bornes des champs d'affichage (miroir de shared/approvals.ts). L'app refait
+#: ce bornage de son cote : le faire ici evite d'envoyer pour rien ce qu'elle
+#: coupera.
+MAX_RISKS = 8
+MAX_RISK_LENGTH = 200
+MAX_SUMMARY_LENGTH = 400
+
+
+def normalize_risks(risks: Optional[Iterable[Any]]) -> List[str]:
+    """Borne les impacts annoncés (« Ce que ça touche »).
+
+    Ce sont des phrases affichees telles quelles a cote d'un bouton
+    « Approuver » : on borne le nombre et la longueur, et on jette ce qui n'est
+    pas une chaine exploitable.
+    """
+    if not risks:
+        return []
+    kept: List[str] = []
+    for entry in risks:
+        if not isinstance(entry, str):
+            continue
+        trimmed = entry.strip()
+        if not trimmed:
+            continue
+        kept.append(trimmed[:MAX_RISK_LENGTH])
+        if len(kept) == MAX_RISKS:
+            break
+    return kept
+
+
 def build_approval_payload(
     channel_slug: str,
     request_id: str,
@@ -54,9 +84,23 @@ def build_approval_payload(
     command: str,
     reason: Optional[str] = None,
     options: Optional[Iterable[Any]] = None,
+    summary: Optional[str] = None,
+    risks: Optional[Iterable[Any]] = None,
 ) -> Dict[str, Any]:
-    """Construit le POST sortant. PURE — aucune I/O."""
-    return {
+    """Construit le POST sortant. PURE — aucune I/O.
+
+    ``summary`` et ``risks`` sont OMIS quand ils sont vides, jamais envoyes a
+    ``None``/``[]``. Le schema d'entree de l'app est ``strict()`` : une app
+    ANTERIEURE a ces deux champs repond ``400 Unrecognized keys`` et la demande
+    d'approbation n'est meme pas creee. Or la mise a jour des bots est manuelle
+    et etalee (cf. docs/11) — un bot mis a jour avant l'app casserait toutes ses
+    approbations. En omettant, ce plugin reste compatible avec les deux
+    versions, et l'ordre de deploiement redevient sans importance. Meme parti
+    pris que ``emitterProfile``, que ce plugin n'envoie jamais.
+    """
+    trimmed_summary = summary.strip()[:MAX_SUMMARY_LENGTH] if isinstance(summary, str) else ""
+    cleaned_risks = normalize_risks(risks)
+    payload: Dict[str, Any] = {
         "channelSlug": channel_slug,
         "kind": "approval_request",
         "requestId": request_id,
@@ -65,6 +109,11 @@ def build_approval_payload(
         "reason": reason,
         "options": normalize_options(options),
     }
+    if trimmed_summary:
+        payload["summary"] = trimmed_summary
+    if cleaned_risks:
+        payload["risks"] = cleaned_risks
+    return payload
 
 
 def parse_approval_reply(frame: Any) -> Optional[Dict[str, Any]]:
