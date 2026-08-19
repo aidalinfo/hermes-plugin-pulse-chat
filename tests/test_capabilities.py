@@ -35,14 +35,15 @@ def test_build_capabilities_assemblage_nominal():
         bundled_names={"outlook-send"},
         usage={"crm-lookup": 42, "outlook-send": 3},
         mcp_servers={"outlook": {"transport": "sse", "url": "https://x"}},
-        config={"model": "hermes-4-70b", "identity": "Assistant CRM"},
+        config={"model": "hermes-4-70b"},
         hermes_version="0.16.0",
         plugin_version="1.0.0",
+        soul="Tu es l'assistant CRM de l'agence.",
     )
 
     assert result == {
         "model": "hermes-4-70b",
-        "identity": "Assistant CRM",
+        "soul": "Tu es l'assistant CRM de l'agence.",
         "hermesVersion": "0.16.0",
         "pluginVersion": "1.0.0",
         "skills": [
@@ -77,7 +78,7 @@ def test_build_capabilities_valeurs_absentes_sans_keyerror():
     )
 
     assert result["model"] is None
-    assert result["identity"] is None
+    assert result["soul"] is None
     assert result["hermesVersion"] is None
     assert result["skills"] == [
         {"name": "solo", "description": "", "provenance": "agent", "usage": 0}
@@ -138,7 +139,7 @@ def test_build_capabilities_model_objet_avec_secret_ne_fuite_pas():
         bundled_names=set(),
         usage={},
         mcp_servers={},
-        config={"model": ModelConfig(), "identity": "Assistant"},
+        config={"model": ModelConfig()},
         hermes_version=None,
         plugin_version="1.0.0",
     )
