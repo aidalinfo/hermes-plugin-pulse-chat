@@ -2,8 +2,8 @@
 """Capacites annoncees par l'agent (frame hello) — module PUR (teste pytest
 sans hermes installe).
 
-La fiche d'un agent dans /admin doit dire ce qu'il sait faire : modele,
-identite, skills, serveurs MCP. Ces donnees vivent cote Hermes, dans des
+La fiche d'un agent dans /admin doit dire ce qu'il sait faire : modele, SOUL,
+skills, serveurs MCP. Ces donnees vivent cote Hermes, dans des
 symboles PRIVES qui peuvent changer de version en version — toute la recolte
 est donc enveloppee dans un try/except large (``collect_capabilities``) : en
 cas d'echec, le plugin retourne ``None`` et journalise un avertissement, mais
@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 
 _DESCRIPTION_MAX_LEN = 200
 _MAX_LIST_LEN = 100
+#: Le SOUL est de la prose libre, parfois longue : la fiche n'en montre qu'une
+#: amorce (meme borne que les descriptions de skills).
+_SOUL_MAX_LEN = 200
 
 
 def _truncate(value: Optional[str], max_len: int) -> str:
@@ -36,9 +39,19 @@ def _truncate(value: Optional[str], max_len: int) -> str:
     return text[:max_len]
 
 
+#: Cles portant le nom du modele dans le bloc ``model:`` de ``config.yaml``,
+#: par ordre de priorite. Hermes documente ``default`` ET ``model`` comme
+#: interchangeables (« Both "default" and "model" work as the key name here »),
+#: et le bloc porte aussi ``provider``, ``api_key``, ``base_url`` — d'ou la
+#: liste blanche. ``name`` ferme la marche : c'est la forme historique, la
+#: SEULE que ce module lisait, et le bloc reel ne l'emploie jamais — donc
+#: ``model`` restait vide sur toutes les fiches.
+_MODEL_NAME_KEYS = ("default", "model", "name")
+
+
 def _readable_name(value: Any) -> Optional[str]:
     """Extrait un nom lisible d'une valeur de config potentiellement porteuse
-    de secrets (ex: ``model`` sous forme d'objet ``{name, provider, api_key,
+    de secrets (ex: ``model`` sous forme d'objet ``{default, provider, api_key,
     base_url}``). N'accepte QUE des chaines en sortie : jamais l'objet brut,
     qui pourrait contenir une cle d'API — le filtrage cote serveur intervient
     trop tard, le secret aurait deja franchi le WS."""
@@ -47,10 +60,80 @@ def _readable_name(value: Any) -> Optional[str]:
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
-        name = value.get("name")
-        return name if isinstance(name, str) else None
-    name = getattr(value, "name", None)
-    return name if isinstance(name, str) else None
+        for key in _MODEL_NAME_KEYS:
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+        return None
+    for key in _MODEL_NAME_KEYS:
+        candidate = getattr(value, key, None)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return None
+
+
+def _mcp_transport(conf: Dict[str, Any]) -> Optional[str]:
+    """Transport d'un serveur MCP, sous forme d'ETIQUETTE (``stdio`` / ``http``
+    / ``sse``) — jamais l'URL ni la commande.
+
+    Hermes ne stocke PAS de champ ``transport`` en general : il le DEDUIT de la
+    forme de l'entree (``url`` ⇒ Streamable HTTP, ``command`` ⇒ stdio), la cle
+    ``transport: sse`` n'existant que pour forcer le SSE sur une entree ``url``
+    (``tools/mcp_tool.py``). Lire ``conf["transport"]`` seul rendait donc
+    ``null`` pour la quasi-totalite des serveurs.
+
+    Deduire, pas recopier : la liste blanche du module interdit de faire
+    franchir le WS a ``url`` (jeton dans le chemin) comme a ``command``/``args``
+    (chemins locaux) — on ne rend que le NOM du transport."""
+    declared = conf.get("transport")
+    if isinstance(declared, str) and declared.strip():
+        return declared.strip()
+    if conf.get("url"):
+        return "http"
+    if conf.get("command"):
+        return "stdio"
+    return None
+
+
+def _mcp_enabled(conf: Dict[str, Any]) -> bool:
+    """``enabled: false`` (booleen ou chaine) ⇒ serveur exclu de la fiche.
+
+    Meme regime que les skills desactivees : la fiche dit ce dont l'agent
+    DISPOSE. Tolere la forme chaine, comme ``hermes mcp list``."""
+    enabled = conf.get("enabled", True)
+    if isinstance(enabled, str):
+        return enabled.strip().lower() in {"true", "1", "yes"}
+    return bool(enabled)
+
+
+def _soul_excerpt(text: Optional[str]) -> Optional[str]:
+    """Premiere ligne UTILE d'un ``SOUL.md``, tronquee — ou ``None``.
+
+    Le SOUL est la premiere fente du prompt systeme d'Hermes (« agent identity
+    », ``agent/prompt_builder.py``) : c'est LUI que la fiche doit montrer. Le
+    champ ``identity`` qu'annonçait ce module n'existe dans AUCUNE version de
+    ``config.yaml`` — il partait donc toujours vide.
+
+    Titres Markdown et commentaires HTML sont ignores : les anciens
+    installeurs semaient un gabarit fait de ces deux seules choses, dont la
+    premiere ligne (« # Hermes Agent Persona ») ne dit rien de l'agent."""
+    if not isinstance(text, str):
+        return None
+    in_comment = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if in_comment:
+            if "-->" in line:
+                in_comment = False
+            continue
+        if line.startswith("<!--"):
+            if "-->" not in line:
+                in_comment = True
+            continue
+        if not line or line.startswith("#"):
+            continue
+        return line[:_SOUL_MAX_LEN]
+    return None
 
 
 def _provenance(name: str, hub_names: Set[str], bundled_names: Set[str]) -> str:
@@ -72,6 +155,7 @@ def build_capabilities(
     config: Dict[str, Any],
     hermes_version: Optional[str],
     plugin_version: str,
+    soul: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Assemble le dictionnaire du contrat a partir de valeurs deja recoltees.
 
@@ -116,24 +200,86 @@ def build_capabilities(
     mcp_list: List[Dict[str, Any]] = []
     for name, raw_conf in (mcp_servers or {}).items():
         conf = raw_conf if isinstance(raw_conf, dict) else {}
-        transport = conf.get("transport")
-        mcp_list.append(
-            {
-                "name": str(name),
-                "transport": str(transport) if transport is not None else None,
-            }
-        )
+        if not _mcp_enabled(conf):
+            continue
+        mcp_list.append({"name": str(name), "transport": _mcp_transport(conf)})
     mcp_list.sort(key=lambda item: item["name"])
     mcp_list = mcp_list[:_MAX_LIST_LEN]
 
     return {
         "model": _readable_name(config.get("model")),
-        "identity": _readable_name(config.get("identity")),
+        "soul": _soul_excerpt(soul),
         "hermesVersion": hermes_version,
         "pluginVersion": plugin_version,
         "skills": kept,
         "mcpServers": mcp_list,
     }
+
+
+def _profile_scope(profile: str):
+    """Contexte de lecture de la configuration pour ``profile``.
+
+    Le nom que porte un bot (``PULSE_CHAT_PROFILE``) est un nom de profil PULSE
+    CHAT (``Channel.hermesProfile``) : rien ne garantit qu'il nomme un profil
+    HERMES. On ne scope donc que si le repertoire existe reellement, et on
+    passe ce REPERTOIRE — pas le nom.
+
+    C'est le defaut qui vidait toutes les fiches : `_profile_runtime_scope`
+    attend un HERMES_HOME et appelle `set_hermes_home_override(str(path))` sans
+    rien valider. Recevant ``"default"``, il faisait pointer HERMES_HOME sur un
+    repertoire RELATIF inexistant — d'ou une configuration vide, zero skill,
+    zero serveur MCP et aucun modele, **sans la moindre erreur** (`load_config`
+    rend `{}` pour un fichier absent, `_find_all_skills` une liste vide). La
+    fiche s'affichait donc « aucune competence · aucun MCP » sur un agent
+    parfaitement configure.
+
+    Ne leve jamais : un nom hors du gabarit d'Hermes
+    (``[a-z0-9][a-z0-9_-]{0,63}``) fait lever `get_profile_dir`, et l'absence
+    de scope est le comportement correct — le process d'un bot mono-profil a
+    deja chargé le bon HERMES_HOME."""
+    if not profile:
+        return contextlib.nullcontext()
+    try:
+        from hermes_cli.profiles import get_profile_dir, normalize_profile_name
+
+        # `default` designe le HERMES_HOME du process : deja actif, rien a
+        # scoper (et le scoper installerait en plus un secret scope inutile).
+        if normalize_profile_name(profile) == "default":
+            return contextlib.nullcontext()
+        profile_home = get_profile_dir(profile)
+        if not profile_home.is_dir():
+            return contextlib.nullcontext()
+        from gateway.run import _profile_runtime_scope
+
+        return _profile_runtime_scope(profile_home)
+    except Exception as exc:
+        logger.debug(
+            "Pulse Chat: pas de scope de profil pour %r (%s) — lecture dans le "
+            "HERMES_HOME du process",
+            profile,
+            exc,
+        )
+        return contextlib.nullcontext()
+
+
+def _collect_soul() -> Optional[str]:
+    """Contenu de ``SOUL.md`` du HERMES_HOME actif, ou ``None``.
+
+    Lu ICI plutot que par `agent.prompt_builder.load_soul_md()` : cette
+    derniere fait bien plus (scan de contenu, troncature avec marqueurs
+    d'injection destines au LLM) pour un besoin d'affichage. Le chemin, lui,
+    est celui-la meme qu'Hermes emploie (`get_hermes_home() / "SOUL.md"`),
+    donc le scope de profil ci-dessus s'y applique aussi."""
+    try:
+        from hermes_constants import get_hermes_home
+
+        soul_path = get_hermes_home() / "SOUL.md"
+        if not soul_path.is_file():
+            return None
+        return soul_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        logger.debug("Pulse Chat: SOUL.md illisible — %s", exc)
+        return None
 
 
 def collect_capabilities(profile: str) -> Optional[Dict[str, Any]]:
@@ -155,21 +301,9 @@ def collect_capabilities(profile: str) -> Optional[Dict[str, Any]]:
         # autre fonction), et les usages `hermes_cli/web_routers/*.py` passent
         # par du late-binding interne au serveur web, hors de portee ici.
         #
-        # A la place : `gateway.run._profile_runtime_scope` si disponible et
-        # qu'un profil est fourni, sinon `nullcontext()` — no-op ASSUME (pas
-        # un oubli) : chaque bot de notre deploiement sert un seul profil via
-        # PULSE_CHAT_PROFILE, donc la configuration chargee dans le process
-        # est deja celle du bon profil ; il n'y a rien a "scoper".
-        scope = contextlib.nullcontext()
-        if profile:
-            try:
-                from gateway.run import _profile_runtime_scope
-
-                scope = _profile_runtime_scope(profile)
-            except ImportError:
-                scope = contextlib.nullcontext()
-
-        with scope:
+        # A la place : `gateway.run._profile_runtime_scope`, qui attend un
+        # REPERTOIRE de profil (HERMES_HOME), jamais un nom.
+        with _profile_scope(profile):
             from tools.skills_tool import _find_all_skills
             from hermes_cli.skills_config import get_disabled_skills
             from tools.skill_usage import (
@@ -231,6 +365,7 @@ def collect_capabilities(profile: str) -> Optional[Dict[str, Any]]:
                 config=_normalize_config(config),
                 hermes_version=hermes_version,
                 plugin_version=plugin_version,
+                soul=_collect_soul(),
             )
     except Exception as exc:  # pragma: no cover - filet, jamais cense manquer
         logger.warning(
@@ -243,14 +378,11 @@ def collect_capabilities(profile: str) -> Optional[Dict[str, Any]]:
 
 def _normalize_config(config: Any) -> Dict[str, Any]:
     """``load_config()`` reel : dict la plupart du temps, objet parfois selon
-    la version Hermes — on ne veut perdre ni ``model`` ni ``identity`` pour
-    autant (contrat pur attend un dict)."""
+    la version Hermes — on ne veut pas perdre ``model`` pour autant (le
+    contrat pur attend un dict)."""
     if isinstance(config, dict):
         return config
-    return {
-        "model": getattr(config, "model", None),
-        "identity": getattr(config, "identity", None),
-    }
+    return {"model": getattr(config, "model", None)}
 
 
 def _read_plugin_version() -> str:
