@@ -11,6 +11,7 @@ hermes-plugin/pulse-chat/
 ├── adapter.py          # PulseChatAdapter + register()
 ├── classification.py   # classification pure message/tool_event (0 dépendance hermes)
 ├── hello.py            # frame hello multi-profils pure (0 dépendance hermes)
+├── channel_context.py  # contexte de canal + artifacts bornés, pure (0 dépendance hermes)
 └── tests/              # pytest (sans hermes installé)
 ```
 
@@ -59,6 +60,31 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
 - **Documents** : les URLs présignées restent dans le **texte** du message
   (l'agent les lit avec ses outils, validité ~15 min) ; les **images** de
   `mediaUrls` sont téléchargées localement et passées en `media_urls` (vision).
+- **Contexte de canal + artifacts bornés** (`channel_context.py`, issue #76) —
+  enrichissement **piloté par le plugin**, PAS un outil MCP :
+  - `GET <PULSE_CHAT_URL>/api/agent/channels/:slug/context?cursor=&limit=` :
+    fenêtre récente de la timeline (même sérialiseur que
+    `GET /api/channels/:slug/messages`), plafond strict 50, curseur explicite.
+    Authentifiée par le Bearer de service **et** l'en-tête `x-hermes-profile`
+    (le profil de ce bot — `self.profiles[0]`), que le serveur compare à
+    `Channel.hermesProfile` : un profil qui ne sert pas ce canal reçoit un
+    refus (404) sans fuite d'existence ;
+  - `GET <PULSE_CHAT_URL>/api/agent/channels/:slug/artifacts/:attachmentId` :
+    contenu texte borné d'un artifact du **même** canal — un binaire, un
+    artifact hors canal ou trop volumineux échoue explicitement (415/413/404),
+    jamais de troncature silencieuse présentée comme complète ;
+  - `PULSE_CHAT_CONTEXT_WINDOW` (0/absent = **désactivé**, comportement
+    identique à avant cette fonctionnalité) active l'injection AUTOMATIQUE,
+    avant chaque message entrant, d'un bloc de contexte récent délimité
+    (`[[pulse_chat:context begin]] … [[pulse_chat:context end]]`) — marqué
+    comme fourni par la plateforme, jamais comme une instruction de
+    l'utilisateur, et n'altère jamais le texte du message déclencheur
+    (préfixé, pas fondu). Best effort : un échec de lecture est journalisé et
+    laisse simplement le texte sans bloc — il n'empêche jamais la réception du
+    message ;
+  - `read_channel_artifact()` est une primitive interne disponible (même
+    contrat que `vault_read()`), non exposée comme capacité/outil de l'agent
+    — le catalogue MCP n'expose aucune capacité de lecture/écriture de canal.
 - **Notes vocales** (`voice.py`) — les deux sens :
   - *entrant* : une frame `message.created` portant `messageType: 'voice'`
     (ou un média `audio/*`) produit un `MessageEvent` de type **`VOICE`**, audio
@@ -133,6 +159,7 @@ hermes plugins enable pulse-chat
 | `PULSE_CHAT_AGENT_NAME` | non | Nom d'affichage envoyé dans la frame hello (défaut : nom du premier profil) |
 | `PULSE_CHAT_CHANNELS` | non | Slugs autorisés séparés par des virgules (vide = tous) |
 | `PULSE_CHAT_ALLOW_ALL_USERS` | non | Mettre `true` : l'accès est déjà filtré côté app via `ChannelMember` (ne pas dupliquer la règle) |
+| `PULSE_CHAT_CONTEXT_WINDOW` | non | Nombre d'items de contexte récent injectés avant chaque message (0/absent = désactivé — défaut ; plafond 50, miroir du plafond serveur) |
 
 ### `~/.hermes/config.yaml`
 

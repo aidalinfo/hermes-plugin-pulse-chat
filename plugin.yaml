@@ -1,7 +1,7 @@
 name: pulse-chat
 label: Pulse Chat
 kind: platform
-version: 1.5.0
+version: 1.6.0
 description: >
   Adaptateur de plateforme Pulse Chat pour Hermes Agent.
   Relaie les messages entre l'app Pulse Chat (front de conversation client)
@@ -47,4 +47,11 @@ optional_env:
   - name: PULSE_CHAT_ALLOW_ALL_USERS
     description: "Accepter tous les utilisateurs (true — l'app filtre deja via ChannelMember)"
     prompt: "Autoriser tous les utilisateurs ? (true/false)"
+    password: false
+  - name: PULSE_CHAT_CONTEXT_WINDOW
+    description: >
+      Nombre d'items de contexte recent injectes avant chaque message
+      (0/absent = desactive, comportement identique a avant cette
+      fonctionnalite ; plafond 50, miroir du plafond serveur)
+    prompt: "Fenetre de contexte recent (0 = desactive)"
     password: false
