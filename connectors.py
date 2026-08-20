@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Connecteurs tiers (Outlook, Teams, agenda) — partie PURE.
+"""Connecteurs tiers (Outlook, Teams, agenda, GitHub) — partie PURE.
 
 Meme principe que ``vault.py``, et pour la meme raison : le plugin n'a AUCUN
-identifiant OAuth, aucun scope, aucune URL Microsoft. Il demande une CAPACITE a
-l'app, avec le Bearer de service deja en place ; c'est l'app qui choisit le
-compte, resout le jeton, appelle le fournisseur et audite.
+identifiant OAuth, aucun scope, aucune URL de fournisseur. Il demande une
+CAPACITE a l'app, avec le Bearer de service deja en place ; c'est l'app qui
+choisit le compte, resout le jeton, appelle le fournisseur et audite.
 
     POST /api/agent/connectors/<capability>
         {channelSlug, params, onBehalfOf?, grantId?}
@@ -28,11 +28,33 @@ from urllib.parse import quote
 #: humain (sauf delegation explicitement dispensee).
 CONNECTOR_CAPABILITIES: Dict[str, bool] = {
     "mail.read": False,
+    # Corps COMPLET + pieces jointes deposees dans le coffre du canal.
+    # Capacite distincte de "mail.read" : la projection en apercu est une regle
+    # du produit, pas une limite technique, et l'elargir en douce aurait fait de
+    # "mail.read" autre chose que ce que le delegant avait accorde.
+    "mail.content": False,
     # Redige un brouillon dans la boite du delegant ; c'est LUI qui envoie.
     # Rien ne quitte le tenant, donc aucun effet de bord de notre point de vue —
     # et aucune approbation asynchrone a calibrer. A preferer a ``mail.send``.
     "mail.draft": False,
     "mail.send": True,
+    # Repond/transfere un message existant. Porte un parametre ``mode``
+    # ("draft"/"send") qui decide de l'effet REEL cote serveur (seul juge qui
+    # compte) ; ce dict-ci reste une liste blanche de CONFORT, statique par
+    # nature, donc au repli le plus prudent : ``True``, comme un envoi peut en
+    # decouler. Un ``mode: "draft"`` refuse ici a tort ne serait qu'un aller-
+    # retour reseau en moins ; l'inverse (laisser passer un envoi non audite)
+    # serait la vraie faute — et n'arrive de toute facon pas, le serveur
+    # tranchant seul (cf. `capabilitySideEffect` dans schemas.ts).
+    "mail.reply": True,
+    "mail.forward": True,
+    # Modifie/supprime un brouillon existant : rien ne quitte le tenant, meme
+    # raison que ``mail.draft``. La suppression est distincte de
+    # ``tasks.delete`` (effet de bord) car un courriel supprime chez Graph part
+    # en "Elements supprimes", recuperable — a la difference de To Do, qui n'a
+    # aucune corbeille.
+    "mail.draft.update": False,
+    "mail.draft.delete": False,
     "calendar.read": False,
     "calendar.write": True,
     # Taches Microsoft To Do. ``tasks.write`` couvre creation ET modification
@@ -44,6 +66,31 @@ CONNECTOR_CAPABILITIES: Dict[str, bool] = {
     # La SUPPRESSION est a part, et a effet de bord : To Do n'a pas de corbeille.
     "tasks.delete": True,
     "teams.post": True,
+    # ── GitHub (GitHub App) ────────────────────────────────────────────────
+    # Le DEPOT est un parametre, jamais une capacite : le perimetre reel est
+    # celui de l'installation, choisie par le delegant. Inventer
+    # "repo.readProjetX" serait le "mail.readFromSender" que ce catalogue
+    # refuse depuis le premier jour.
+    #
+    # "repo.read" lit du CODE : sans effet de bord (rien ne sort vers un
+    # tiers), mais autorite forte — du code prive entre dans le contexte d'un
+    # LLM — d'ou une capacite a part que le delegant coche sciemment, comme
+    # "mail.content" face a "mail.read".
+    "repo.read": False,
+    "issues.read": False,
+    # Effet de bord, et contrairement a "tasks.write" ce n'est pas discutable :
+    # un commentaire NOTIFIE des tiers sous le nom du delegant, et il est deja
+    # parti. Meme regime que "mail.send".
+    "issues.write": True,
+    # Separee de "issues.read" bien que GitHub serve les deux par la meme API :
+    # c'est la PERMISSION qui differe chez le fournisseur, et un diff, c'est du
+    # code.
+    "pr.read": False,
+    "pr.write": True,
+    # Ne rend PAS les journaux (variables d'environnement, URL signees,
+    # extraits de code) : ce sera "ci.logs", meme raisonnement que
+    # "mail.content" face a "mail.read".
+    "ci.read": False,
 }
 
 #: Codes d'erreur du serveur, et ce que l'agent doit en faire. Traduire ici
