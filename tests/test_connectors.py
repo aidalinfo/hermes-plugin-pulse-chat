@@ -38,6 +38,41 @@ class TestNormalizeCapability:
             normalize_capability(raw)
 
 
+#: Catalogue attendu, dans l'ordre de ``shared/connectors.ts``. Ce test n'est
+#: pas une redondance du dict : il rend la DERIVE visible. Le miroir a deja
+#: decroche une fois — l'app avait livre ``mail.content`` et les capacites
+#: GitHub, ce module refusait localement les appels correspondants avec
+#: « capacite inconnue », sans qu'aucun test ne rougisse. Ajouter une capacite
+#: cote app doit casser ici, et forcer la mise a jour consciente du miroir.
+CATALOGUE_ATTENDU = (
+    "mail.read",
+    "mail.content",
+    "mail.draft",
+    "mail.send",
+    "mail.reply",
+    "mail.forward",
+    "mail.draft.update",
+    "mail.draft.delete",
+    "calendar.read",
+    "calendar.write",
+    "tasks.read",
+    "tasks.write",
+    "tasks.delete",
+    "teams.post",
+    "repo.read",
+    "issues.read",
+    "issues.write",
+    "pr.read",
+    "pr.write",
+    "ci.read",
+)
+
+
+class TestCatalogue:
+    def test_miroir_complet_de_shared_connectors_ts(self):
+        assert sorted(CONNECTOR_CAPABILITIES) == sorted(CATALOGUE_ATTENDU)
+
+
 class TestSideEffect:
     def test_le_brouillon_n_a_pas_d_effet_de_bord(self):
         # C'est ce qui permet de le livrer sans approbation asynchrone : rien ne
@@ -55,6 +90,34 @@ class TestSideEffect:
         assert has_side_effect("tasks.write") is False
         # To Do n'a pas de corbeille : la suppression est irreversible.
         assert has_side_effect("tasks.delete") is True
+
+    def test_le_courriel_lu_en_entier_reste_sans_effet_de_bord(self):
+        # Autorite plus large que ``mail.read`` (corps complet + pieces jointes
+        # deposees dans le coffre), mais rien ne sort du tenant vers un tiers.
+        # La marquer autrement la rendrait inutilisable : le proxy refuse tant
+        # qu'aucune approbation n'est cablee.
+        assert has_side_effect("mail.content") is False
+
+    def test_la_reponse_et_le_transfert_prennent_le_repli_prudent(self):
+        # Leur effet REEL depend de ``params.mode`` et n'est tranche que par le
+        # serveur (``capabilitySideEffect``). Ce dict-ci etant statique, il
+        # annonce le cas le plus engageant : un envoi peut en decouler.
+        assert has_side_effect("mail.reply") is True
+        assert has_side_effect("mail.forward") is True
+
+    def test_modifier_ou_jeter_un_brouillon_suit_la_regle_du_brouillon(self):
+        # Rien ne quitte le tenant, et un courriel supprime chez Graph part en
+        # « Elements supprimes » — recuperable, a la difference de To Do.
+        assert has_side_effect("mail.draft.update") is False
+        assert has_side_effect("mail.draft.delete") is False
+
+    def test_github_lit_sans_effet_de_bord_mais_ecrit_avec(self):
+        for capability in ("repo.read", "issues.read", "pr.read", "ci.read"):
+            assert has_side_effect(capability) is False
+        # Un commentaire de ticket NOTIFIE des tiers sous le nom du delegant :
+        # meme regime que ``mail.send``, a la difference de ``tasks.write``.
+        for capability in ("issues.write", "pr.write"):
+            assert has_side_effect(capability) is True
 
     def test_une_capacite_inconnue_est_traitee_comme_dangereuse(self):
         # Repli le plus PRUDENT : la traiter comme sans effet de bord la ferait
