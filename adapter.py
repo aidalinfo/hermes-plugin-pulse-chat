@@ -27,6 +27,10 @@ Configuration (env > config.extra) :
                                 hello (defaut: nom du premier profil)
     PULSE_CHAT_CHANNELS         optionnel — slugs autorises, separes par des virgules
     PULSE_CHAT_ALLOW_ALL_USERS  optionnel — true (l'app filtre deja via ChannelMember)
+    PULSE_CHAT_CONTEXT_WINDOW   optionnel — nombre d'items de contexte recent
+                                injectes avant chaque message (0/absent = desactive,
+                                comportement identique a avant #76 ; plafond 50,
+                                miroir du plafond serveur)
 """
 
 from __future__ import annotations
@@ -70,6 +74,14 @@ from .connectors import (
     build_connector_payload,
     connector_url,
     parse_connector_error,
+)
+from .channel_context import (
+    MAX_CONTEXT_LIMIT,
+    artifact_url,
+    clamp_limit,
+    context_url,
+    format_context_block,
+    parse_artifact_response,
 )
 from .vault import vault_url
 from .voice import (
@@ -355,6 +367,18 @@ class PulseChatAdapter(BasePlatformAdapter):
             self.channels = {c.strip() for c in channels.split(",") if c.strip()}
         else:
             self.channels = {str(c).strip() for c in (channels or []) if str(c).strip()}
+
+        # Fenetre de contexte recent injectee avant chaque message (#76) — 0/absent
+        # = DESACTIVE (defaut : un plugin deja deploye continue de fonctionner a
+        # l'identique, sans appel reseau ni texte supplementaire). Plafond miroir
+        # du serveur (`clamp_limit`) : une valeur excessive est ramenee, pas rejetee.
+        raw_context_window = _get_secret("PULSE_CHAT_CONTEXT_WINDOW") or extra.get(
+            "context_window", 0
+        )
+        try:
+            self.context_window: int = max(0, min(int(raw_context_window), MAX_CONTEXT_LIMIT))
+        except (TypeError, ValueError):
+            self.context_window = 0
 
         # Etat runtime
         # Jeton de session recu dans ``hello.ack`` (identite de l'emetteur).
@@ -768,10 +792,17 @@ class PulseChatAdapter(BasePlatformAdapter):
         is_voice = str(message.get("messageType") or "").lower() == "voice" or any(
             is_audio_mime(mime) for mime in media_types
         )
+        # Contexte recent (#76) — desactive par defaut (context_window == 0),
+        # jamais bloquant : un echec laisse simplement le texte SANS bloc,
+        # comme avant cette fonctionnalite. Prefixe, delimite, jamais fondu
+        # dans le texte du declencheur (qui reste intact ci-dessous).
+        trigger_text = message.get("text") or ""
+        context_block = await self._build_context_block(slug)
+        text = "%s\n\n%s" % (context_block, trigger_text) if context_block else trigger_text
         event = build_message_event(
             MessageEvent,
             {
-                "text": message.get("text") or "",
+                "text": text,
                 "message_type": MessageType.VOICE if is_voice else MessageType.TEXT,
                 "source": source,
                 "message_id": str(message_id),
@@ -1304,6 +1335,102 @@ class PulseChatAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("Pulse Chat: coffre %s en echec — %s", method, exc)
         return None
+
+    # ── Contexte de canal + artifacts bornes (#76) ────────────────────────
+    #
+    # Enrichissement de contexte PILOTE PAR LE PLUGIN a partir de sa session
+    # DEJA verifiee (Bearer de service + profil declare) — jamais un outil MCP
+    # que l'agent appellerait pour lire arbitrairement un canal. Le serveur
+    # derive l'autorite de la session (refus uniforme si le profil ne sert pas
+    # CE canal) ; ce module transporte, ne decide rien.
+
+    async def get_channel_context(
+        self, chat_id: str, cursor: Optional[str] = None, limit: Optional[int] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Fenetre de contexte recente du canal ``chat_id``.
+
+        Renvoie ``{"items": [...], "nextCursor": str|None}`` (meme forme que
+        GET /api/channels/:slug/messages), ou ``None`` en cas d'echec —
+        AUCUNE exception ne remonte : une lecture de contexte en echec ne doit
+        ni empecher la reception du message initial, ni laisser croire a une
+        reponse qui aurait lu un contexte qu'elle n'a pas.
+        """
+        url = context_url(self.base_url, chat_id, cursor=cursor, limit=limit)
+        data = await asyncio.to_thread(self._channel_get_request, url)
+        if not data:
+            return None
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            logger.warning("Pulse Chat: reponse de contexte illisible (%s)", chat_id)
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            return None
+        return payload
+
+    async def read_channel_artifact(
+        self, chat_id: str, attachment_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Contenu texte borne d'un artifact du MEME canal, ou ``None`` en cas
+        d'echec (artifact hors canal, binaire, trop volumineux, ou reseau —
+        le serveur tranche, cf. agentContextService.ts). Jamais d'exception.
+        """
+        try:
+            url = artifact_url(self.base_url, chat_id, attachment_id)
+        except ValueError as exc:
+            logger.warning("Pulse Chat: artifactId invalide — %s", exc)
+            return None
+        data = await asyncio.to_thread(self._channel_get_request, url)
+        if not data:
+            return None
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            logger.warning("Pulse Chat: reponse d'artifact illisible (%s)", attachment_id)
+            return None
+        return parse_artifact_response(payload)
+
+    def _channel_get_request(self, url: str) -> Optional[bytes]:
+        """GET authentifie (bloquant — appele via ``asyncio.to_thread``).
+
+        Ajoute le profil declare (``x-hermes-profile``) : c'est lui que le
+        serveur compare a ``Channel.hermesProfile`` pour autoriser CE canal.
+        Retourne ``None`` en cas d'echec — jamais d'exception (meme contrat
+        que ``_vault_request``).
+        """
+        headers = self._auth_headers({"x-hermes-profile": self.profiles[0]})
+        request = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            logger.warning("Pulse Chat: contexte GET %s -> HTTP %s", url, exc.code)
+        except Exception as exc:
+            logger.warning("Pulse Chat: contexte GET %s en echec — %s", url, exc)
+        return None
+
+    async def _build_context_block(self, chat_id: str) -> Optional[str]:
+        """Bloc de contexte a injecter avant le message declencheur, ou
+        ``None`` si desactive (``context_window == 0``) ou en echec.
+
+        BEST EFFORT et NON BLOQUANT : toute exception est journalisee et
+        avalee ici — un contexte manquant ne doit jamais faire echouer la
+        reception du message ni laisser croire, dans le texte transmis a
+        Hermes, qu'un contexte a ete lu alors qu'il ne l'a pas ete (dans ce
+        cas, le bloc est simplement absent).
+        """
+        if self.context_window <= 0:
+            return None
+        try:
+            context = await self.get_channel_context(
+                chat_id, limit=clamp_limit(self.context_window)
+            )
+        except Exception as exc:  # defense en profondeur — ne doit jamais arriver
+            logger.warning("Pulse Chat: contexte de canal en echec (%s) — %s", chat_id, exc)
+            return None
+        if context is None:
+            return None
+        return format_context_block(context.get("items") or [], chat_id)
 
     # ── Connecteurs tiers (Outlook, Teams, agenda) ───────────────────────
 
