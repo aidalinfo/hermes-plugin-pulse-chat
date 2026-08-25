@@ -65,10 +65,9 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
   - `GET <PULSE_CHAT_URL>/api/agent/channels/:slug/context?cursor=&limit=` :
     fenêtre récente de la timeline (même sérialiseur que
     `GET /api/channels/:slug/messages`), plafond strict 50, curseur explicite.
-    Authentifiée par le Bearer de service **et** l'en-tête `x-hermes-profile`
-    (le profil de ce bot — `self.profiles[0]`), que le serveur compare à
-    `Channel.hermesProfile` : un profil qui ne sert pas ce canal reçoit un
-    refus (404) sans fuite d'existence ;
+    Authentifiée par les en-têtes standard du plugin : Bearer de service et,
+    lorsqu'elle existe, `x-hermes-session`. Le serveur résout lui-même le canal
+    servi depuis la session ; le Bearer demeure le repli rétrocompatible ;
   - `GET <PULSE_CHAT_URL>/api/agent/channels/:slug/artifacts/:attachmentId` :
     contenu texte borné d'un artifact du **même** canal — un binaire, un
     artifact hors canal ou trop volumineux échoue explicitement (415/413/404),

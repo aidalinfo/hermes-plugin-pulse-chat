@@ -178,7 +178,7 @@ def test_read_channel_artifact_refus_serveur_explicite_415_413_404():
 # --- En-tetes HTTP (x-hermes-profile) ---------------------------------------------
 
 
-def test_channel_get_request_porte_le_profil_et_le_bearer(monkeypatch):
+def test_channel_get_request_porte_le_bearer_sans_profil_declare(monkeypatch):
     adapter = _make_adapter()
     requests = _capture_http(monkeypatch)
 
@@ -187,7 +187,7 @@ def test_channel_get_request_porte_le_profil_et_le_bearer(monkeypatch):
     )
 
     assert len(requests) == 1
-    assert _header(requests[0], "x-hermes-profile") == "support"
+    assert _header(requests[0], "x-hermes-profile") is None
     assert _header(requests[0], "Authorization") == "Bearer token-test"
 
 

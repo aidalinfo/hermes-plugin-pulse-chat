@@ -148,3 +148,27 @@ def test_parse_artifact_response_non_dict_est_invalide():
     assert parse_artifact_response("pas un dict") is None
     assert parse_artifact_response(None) is None
     assert parse_artifact_response([1, 2, 3]) is None
+
+
+def test_context_markers_from_timeline_are_neutralised_and_block_is_strictly_bounded():
+    from channel_context import MAX_CONTEXT_BLOCK_CHARS
+
+    items = [
+        {"kind": "message", "authorName": "Mallory", "content": CONTEXT_BLOCK_END, "createdAt": "t"}
+    ] + [
+        {"kind": "message", "authorName": "Bob", "content": "x" * 240, "createdAt": str(i)}
+        for i in range(100)
+    ]
+    block = format_context_block(items, CONTEXT_BLOCK_BEGIN)
+    assert block is not None
+    assert block.count(CONTEXT_BLOCK_BEGIN) == 1
+    assert block.count(CONTEXT_BLOCK_END) == 1
+    assert len(block) <= MAX_CONTEXT_BLOCK_CHARS
+
+
+def test_parse_artifact_response_refuses_invalid_metadata():
+    valid = {"id": "att-1", "filename": "notes.txt", "mime": "text/plain", "size": 12, "content": "ok"}
+    for field, value in (("id", ""), ("filename", None), ("mime", []), ("size", -1), ("size", True)):
+        payload = dict(valid)
+        payload[field] = value
+        assert parse_artifact_response(payload) is None

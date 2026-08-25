@@ -147,6 +147,8 @@ _WS_CONNECT_TIMEOUT = 30.0
 _WS_MAX_SIZE = 10 * 1024 * 1024
 _MEDIA_MAX_BYTES = 20 * 1024 * 1024
 _MEDIA_MAX_COUNT = 10
+# Texte artifact borné côté app à 200 Ko, plus une marge d’enveloppe JSON.
+_CHANNEL_GET_MAX_BYTES = 256 * 1024
 # Dedup du rejeu serveur : cache borne des derniers message ids traites (un
 # ``message.created`` deja vu est re-acke mais PAS re-dispatche a l'agent).
 _DEDUP_MAX_IDS = 500
@@ -797,7 +799,8 @@ class PulseChatAdapter(BasePlatformAdapter):
         # comme avant cette fonctionnalite. Prefixe, delimite, jamais fondu
         # dans le texte du declencheur (qui reste intact ci-dessous).
         trigger_text = message.get("text") or ""
-        context_block = await self._build_context_block(slug)
+        # Préserver la transcription/auto-TTS : pas de contexte dans VOICE.
+        context_block = None if is_voice else await self._build_context_block(slug)
         text = "%s\n\n%s" % (context_block, trigger_text) if context_block else trigger_text
         event = build_message_event(
             MessageEvent,
@@ -1393,21 +1396,24 @@ class PulseChatAdapter(BasePlatformAdapter):
     def _channel_get_request(self, url: str) -> Optional[bytes]:
         """GET authentifie (bloquant — appele via ``asyncio.to_thread``).
 
-        Ajoute le profil declare (``x-hermes-profile``) : c'est lui que le
-        serveur compare a ``Channel.hermesProfile`` pour autoriser CE canal.
-        Retourne ``None`` en cas d'echec — jamais d'exception (meme contrat
-        que ``_vault_request``).
+        Le serveur résout le canal servi depuis la session lorsqu'elle existe ;
+        le Bearer de service reste le repli rétrocompatible. Retourne ``None``
+        en cas d'echec — jamais d'exception (meme contrat que ``_vault_request``).
         """
-        headers = self._auth_headers({"x-hermes-profile": self.profiles[0]})
-        request = urllib.request.Request(url, headers=headers, method="GET")
+        request = urllib.request.Request(url, headers=self._auth_headers(), method="GET")
         try:
             with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT) as response:
-                return response.read()
+                data = response.read(_CHANNEL_GET_MAX_BYTES + 1)
         except urllib.error.HTTPError as exc:
             logger.warning("Pulse Chat: contexte GET %s -> HTTP %s", url, exc.code)
+            return None
         except Exception as exc:
             logger.warning("Pulse Chat: contexte GET %s en echec — %s", url, exc)
-        return None
+            return None
+        if len(data) > _CHANNEL_GET_MAX_BYTES:
+            logger.warning("Pulse Chat: reponse de canal trop volumineuse, lecture abandonnee — %s", url)
+            return None
+        return data
 
     async def _build_context_block(self, chat_id: str) -> Optional[str]:
         """Bloc de contexte a injecter avant le message declencheur, ou

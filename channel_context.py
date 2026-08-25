@@ -30,6 +30,7 @@ MAX_CONTEXT_LIMIT = 50
 #: dans le message transmis à Hermes, qui reste un COÛT — tokens du modèle).
 MAX_CONTEXT_BLOCK_CHARS = 8_000
 MAX_ITEM_PREVIEW_CHARS = 240
+MAX_CHANNEL_SLUG_CHARS = 120
 
 #: Marqueurs délimitant le bloc — distincts de toute instruction humaine
 #: (jamais interprétés comme tels), format `[[ ]]` — même convention que les
@@ -79,9 +80,17 @@ def clamp_limit(limit: Any) -> int:
     return max(1, min(value, MAX_CONTEXT_LIMIT))
 
 
+def _neutralise_markers(text: str) -> str:
+    """Empêche une valeur de canal de reproduire une frontière de bloc."""
+    return text.replace(CONTEXT_BLOCK_BEGIN, "(marqueur neutralisé)").replace(
+        CONTEXT_BLOCK_END, "(marqueur neutralisé)"
+    )
+
+
 def _one_line(text: Any, max_chars: int = MAX_ITEM_PREVIEW_CHARS) -> str:
-    """Aplati en une ligne, borné — un item ne doit jamais faire déborder le bloc."""
+    """Aplati, neutralisé et borné — un item ne forge jamais un délimiteur."""
     flat = " ".join(str(text if text is not None else "").split())
+    flat = _neutralise_markers(flat)
     if len(flat) > max_chars:
         return flat[: max_chars - 1].rstrip() + "…"
     return flat
@@ -95,12 +104,15 @@ def _format_item(item: Dict[str, Any]) -> Optional[str]:
     when = _one_line(item.get("createdAt") or "", 32)
     if kind == "message":
         author = _one_line(item.get("authorName") or item.get("authorType") or "?", 40)
-        return "- [%s] %s: %s" % (when, author, _one_line(item.get("content")))
-    if kind == "tool_event":
+        line = "- [%s] %s: %s" % (when, author, _one_line(item.get("content")))
+    elif kind == "tool_event":
         tool = _one_line(item.get("tool") or "outil", 40)
         phase = _one_line(item.get("phase") or "", 16)
-        return "- [%s] (%s %s) %s" % (when, tool, phase, _one_line(item.get("content")))
-    return None
+        line = "- [%s] (%s %s) %s" % (when, tool, phase, _one_line(item.get("content")))
+    else:
+        return None
+    # Le gabarit peut joindre des fragments sûrs pour former un marqueur exact.
+    return _neutralise_markers(line)
 
 
 def format_context_block(items: List[Dict[str, Any]], channel_slug: str) -> Optional[str]:
@@ -120,30 +132,39 @@ def format_context_block(items: List[Dict[str, Any]], channel_slug: str) -> Opti
 
     kept = list(lines)
     omitted = 0
-    body = "\n".join(kept)
-    while kept and len(body) > MAX_CONTEXT_BLOCK_CHARS:
+    safe_slug = _one_line(channel_slug, MAX_CHANNEL_SLUG_CHARS)
+    while kept:
+        header = [CONTEXT_BLOCK_BEGIN, "%s (canal %s)" % (CONTEXT_BLOCK_NOTE, safe_slug)]
+        if omitted:
+            header.append("(%d item(s) plus ancien(s) omis — bloc borné)" % omitted)
+        block = "\n".join(header + kept + [CONTEXT_BLOCK_END])
+        if len(block) <= MAX_CONTEXT_BLOCK_CHARS:
+            return block
         kept.pop(0)  # le plus ancien d'abord — les items les plus récents priment
         omitted += 1
-        body = "\n".join(kept)
-    if not kept:
-        return None
-
-    header = [CONTEXT_BLOCK_BEGIN, "%s (canal %s)" % (CONTEXT_BLOCK_NOTE, channel_slug)]
-    if omitted:
-        header.append("(%d item(s) plus ancien(s) omis — bloc borné)" % omitted)
-    return "\n".join(header + [body, CONTEXT_BLOCK_END])
+    return None
 
 
 def parse_artifact_response(payload: Any) -> Optional[Dict[str, Any]]:
     """Valide la forme `{id, filename, mime, size, content}` — sinon `None`."""
     if not isinstance(payload, dict):
         return None
-    if not isinstance(payload.get("content"), str):
+    content = payload.get("content")
+    identifier, filename, mime, size = (
+        payload.get("id"), payload.get("filename"), payload.get("mime"), payload.get("size")
+    )
+    if (
+        not isinstance(content, str)
+        or not isinstance(identifier, str) or not identifier.strip()
+        or not isinstance(filename, str) or not filename.strip()
+        or not isinstance(mime, str) or not mime.strip()
+        or isinstance(size, bool) or not isinstance(size, int) or size < 0
+    ):
         return None
     return {
-        "id": payload.get("id"),
-        "filename": payload.get("filename"),
-        "mime": payload.get("mime"),
-        "size": payload.get("size"),
-        "content": payload["content"],
+        "id": identifier.strip(),
+        "filename": filename.strip(),
+        "mime": mime.strip(),
+        "size": size,
+        "content": content,
     }
