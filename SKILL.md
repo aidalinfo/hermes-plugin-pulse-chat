@@ -1,6 +1,6 @@
 ---
 name: pulse-chat
-description: Utiliser Pulse Chat depuis un agent Hermes — appeler les outils MCP exposés par /mcp-hermes (plan de travail, coffre-fort, connecteurs), ne pas confondre plan_* (ton propre plan) avec tasks_* (la liste To Do d'un humain délégant), et livrer une réponse de routine avec routine_deliver (aucun repli : sans cet appel, personne ne reçoit rien).
+description: Utiliser Pulse Chat depuis un agent Hermes — appeler les outils MCP exposés par /mcp-hermes (plan de travail, coffre-fort, connecteurs), ne pas confondre plan_* (ton propre plan) avec tasks_* (la liste To Do d'un humain délégant), et pour une routine : ta réponse en prose est relayée automatiquement vers sa destination, mais si tu veux livrer un texte de synthèse choisi à sa place, appelle routine_deliver AVANT d'écrire ta réponse — appelé après, il est refusé, ta prose étant déjà partie.
 ---
 
 > ⚠️ **Format non vérifié.** Cette skill a été écrite sans pouvoir inspecter
@@ -84,35 +84,47 @@ s'exécuter pour de vrai. Si un appel te répond qu'une approbation est en
 attente, ne réessaie pas en boucle : c'est en cours de décision côté humain,
 la réponse arrivera par le canal normal.
 
-## `routine_deliver` : livrer une réponse de routine
+## Répondre à une routine
 
 Une **routine** est un prompt planifié qui te réveille périodiquement sans
 qu'un humain t'ait sollicité dans l'instant. Quand une routine te réveille,
 tu ne te retrouves PAS dans le canal habituel : tu travailles dans une
-**salle privée**, ouverte pour cette seule exécution, que **personne ne
-lit**. Tout ce que tu écris dans cette salle — brouillons, réflexions,
-appels d'outils intermédiaires — reste invisible de tous.
+**salle de travail privée**, ouverte pour cette seule exécution, que
+personne ne lit en direct.
 
-**La seule façon de faire sortir ta réponse de cette salle est d'appeler
-l'outil `routine_deliver`** avec le canal de la salle et le texte de ta
-réponse finale. Il n'y a **aucun repli** : si tu ne l'appelles pas, ta
-réponse ne va nulle part, et l'exécution est déclarée en échec à l'échéance
-— comme si tu n'avais jamais répondu, même si tu as fini le travail.
+**Ta réponse ordinaire est relayée automatiquement — tu n'as rien de
+particulier à faire.** Tout ce que tu écris en prose dans cette salle, par
+la voie habituelle du plugin (le même canal qui te fait recevoir ce
+message), est transmis par l'app vers la destination que la routine a déjà
+fixée (un canal, ou la conversation privée d'une personne désignée). Aucun
+outil MCP n'est requis pour qu'une routine fonctionne. Si tu écris
+plusieurs bulles de prose — par exemple « je regarde ça » puis ta réponse —
+les DEUX sont relayées telles quelles à l'humain : ne compte pas sur un
+filtrage automatique de ta prose intermédiaire, et n'écris dans cette salle
+que ce que tu es prêt à voir arriver chez l'humain.
 
-Points à retenir :
+**`routine_deliver` existe pour un besoin plus précis : remplacer ta prose
+par un texte de synthèse choisi, et clore le tour explicitement.** C'est un
+outil de PRÉCISION, pas la condition pour que quoi que ce soit arrive.
 
+- **Il s'appelle AVANT d'écrire ta réponse en prose, jamais après.** C'est
+  une règle de séquence, pas une nuance : si tu as déjà écrit ta réponse,
+  elle est déjà partie par le relais automatique, et il n'y a plus rien à
+  remplacer. Appelle `routine_deliver` seulement quand tu sais, avant de
+  rédiger ta conclusion, que tu veux fixer toi-même le texte final livré à
+  l'humain plutôt que de laisser passer ta prose telle quelle.
+- **Si tu as déjà écrit ta réponse, ne l'appelle PAS.** Elle est déjà
+  transmise ; l'outil refuse l'appel dans ce cas précis (le tour est déjà
+  clos côté relais), et ce refus n'est pas une erreur à contourner — c'est
+  le signal que tu es arrivé trop tard. L'appeler « pour rattraper » une
+  synthèse après une prose bavarde échoue systématiquement : c'est un piège
+  à éviter, pas une pratique recommandée.
+- **Un seul appel par exécution**, et il clôt la salle de travail — pas un
+  moyen d'envoyer plusieurs messages ni de te corriger après coup.
 - **Tu ne choisis pas le destinataire.** `routine_deliver` ne prend qu'un
-  canal et un texte ; c'est la routine, configurée par un humain, qui a déjà
-  fixé où ta réponse doit arriver (un canal, ou une conversation privée avec
-  quelqu'un). N'essaie pas de deviner ou de forcer une autre destination.
-- **Un seul appel par exécution.** `routine_deliver` clôt la salle de
-  travail. Un second appel sur la même exécution est refusé — ce n'est pas
-  un moyen d'envoyer plusieurs messages ou de te corriger après coup.
-  Prépare ta réponse finale avant d'appeler l'outil.
-- **N'appelle jamais l'outil « en cours de route » sur une étape
-  intermédiaire.** Ce que tu livres est ta conclusion, pas un état
-  d'avancement — la salle n'a pas de spectateur pour lire un « je continue
-  à chercher ».
+  canal et un texte ; la routine, configurée par un humain, a déjà fixé où
+  ta réponse doit arriver. N'essaie pas de deviner ou de forcer une autre
+  destination.
 - **N'invente jamais ta propre planification pour répéter cette
   impulsion.** Ne crée pas de tâche récurrente, de rappel, ni de planning
   personnel qui rejouerait ce même travail plus tard : la routine est déjà
