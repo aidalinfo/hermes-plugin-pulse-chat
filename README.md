@@ -20,6 +20,13 @@ hermes-plugin/pulse-chat/
 Ce plugin est publié sur **github.com/aidalinfo/hermes-plugin-pulse-chat**
 (miroir automatique du monorepo `PROJET-pulse-chat`, dossier `hermes-plugin/pulse-chat/`).
 
+Voir aussi [`SKILL.md`](./SKILL.md) : ce que **l'agent** doit savoir pour se
+servir de Pulse Chat une fois branché (outils MCP `/mcp-hermes`, le piège
+`plan_*` vs `tasks_*`, le coffre-fort, les approbations, et
+`routine_deliver` — le seul chemin par lequel une réponse de routine sort de
+sa salle de travail). Format non vérifié dans une image Hermes réelle : voir
+l'avertissement en tête du fichier.
+
 ```bash
 # Voie 1 — CLI Hermes
 hermes plugins install aidalinfo/hermes-plugin-pulse-chat --enable
