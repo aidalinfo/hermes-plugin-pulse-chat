@@ -1641,6 +1641,41 @@ class PulseChatAdapter(BasePlatformAdapter):
 # Enregistrement du plugin
 # ---------------------------------------------------------------------------
 
+def parse_target_ref(ref: str):
+    """Cible native de Pulse Chat : un ``Channel.slug``, rendu TEL QUEL.
+
+    Hermes resout la cible d'un envoi (``send_message``, livraison d'un cron
+    ``deliver=``, ``react``/``unreact``) en trois temps : le parseur declare par
+    le plugin, puis les regles generiques d'Hermes, puis l'annuaire de canaux.
+    Un slug Pulse Chat (``general``, ``rt-1a2b3c4d``, ``ch-...``) n'est ni
+    numerique ni l'une des syntaxes natives qu'Hermes connait : il tombait donc
+    dans l'annuaire, qui ne contient AUCUNE entree Pulse Chat, et l'envoi
+    echouait sur un « Could not resolve » alors que le canal existe. Declarer ce
+    parseur est ce qui remplace le patch qui reecrivait
+    ``/opt/hermes/tools/send_message_tool.py`` a l'installation : la regle de
+    routage vit chez le plugin qui possede la syntaxe, pas dans une copie
+    modifiee du coeur d'Hermes qu'il faut reappliquer a chaque version.
+
+    Le slug est rendu SANS ETRE VALIDE, et c'est delibere : l'app est la seule
+    autorite sur l'existence d'un canal et sur le droit d'y ecrire (elle repond
+    404, comme partout ailleurs dans ce plugin). Un motif de slug code ici
+    serait une seconde regle a tenir d'accord avec celle de l'app — et le jour
+    ou l'app ouvrirait une nouvelle forme de slug, l'envoi echouerait ici sans
+    qu'aucune erreur ne designe la cause.
+
+    Toujours ``thread_id = None`` : un canal Pulse Chat n'a pas de
+    sous-conversation.
+
+    ``None`` sur une chaine vide, jamais ``("", None)`` : Hermes n'appelle ce
+    parseur qu'avec une cible EXPLICITE (une cible absente part sur le canal
+    d'accueil avant d'arriver ici), donc le cas ne se presente pas — mais rendre
+    ``("", None)`` ferait poster dans un canal que personne n'a nomme, la ou
+    ``None`` laisse Hermes poursuivre sa resolution.
+    """
+    slug = (ref or "").strip()
+    return (slug, None) if slug else None
+
+
 def check_requirements() -> bool:
     """Env minimale presente (chemin `hermes setup` / requirements check)."""
     return bool(os.getenv("PULSE_CHAT_URL") and os.getenv("PULSE_CHAT_TOKEN"))
@@ -1656,7 +1691,7 @@ def validate_config(config) -> bool:
 
 def register(ctx):
     """Point d'entree plugin : appele par le systeme de plugins Hermes."""
-    ctx.register_platform(
+    entry = dict(
         name="pulse_chat",
         label="Pulse Chat",
         adapter_factory=lambda cfg: PulseChatAdapter(cfg),
@@ -1680,3 +1715,23 @@ def register(ctx):
             "them promptly). Keep a professional, helpful tone with clients."
         ),
     )
+    # ``parse_target_ref_fn`` n'existe pas sur les Hermes anterieurs a
+    # v2026.8.13 (absent de ``PlatformEntry`` en v2026.8.3, la version minimale
+    # que ce plugin annonce), et ``register_platform`` fait remonter les kwargs
+    # inconnus a ``PlatformEntry(**kwargs)`` — donc un ``TypeError``. Le passer
+    # sans repli ne degraderait pas le routage : il ferait echouer
+    # l'enregistrement de la PLATEFORME entiere, et le bot perdrait Pulse Chat
+    # d'un coup. Le rejeu est sans danger : le ``TypeError`` est leve a la
+    # construction de l'entree, avant toute inscription au registre.
+    try:
+        ctx.register_platform(parse_target_ref_fn=parse_target_ref, **entry)
+    except TypeError:
+        _warn_once(
+            "parse_target_ref_kwarg",
+            "Pulse Chat: cet Hermes ne connait pas 'parse_target_ref_fn' — la "
+            "plateforme est enregistree sans parseur de cible. Un envoi vers "
+            "'pulse_chat:<slug>' (send_message, livraison d'un cron 'deliver=') "
+            "echouera sur un 'Could not resolve' ; mettre Hermes a jour "
+            "(>= v2026.8.13). Les reponses dans le canal ne sont pas affectees.",
+        )
+        ctx.register_platform(**entry)
