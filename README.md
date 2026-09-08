@@ -119,6 +119,41 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
   hoquet inexplicable. `decode_audio_frame()` est la définition exécutable du
   format — l'app la réimplémente en TypeScript d'après elle.
 
+### Router un envoi vers un canal Pulse Chat
+
+Le plugin déclare son propre parseur de cible
+(`parse_target_ref_fn`, Hermes ≥ **v2026.8.13**) : `pulse_chat:<slug>` est
+résolu tel quel, sans thread.
+
+C'est ce qui **remplace le patch** qui réécrivait
+`/opt/hermes/tools/send_message_tool.py` à l'installation. Hermes résout une
+cible en trois temps — parseur du plugin, règles génériques, annuaire de
+canaux — et un slug Pulse Chat (`general`, `rt-1a2b3c4d`) n'est ni numérique
+ni une syntaxe native connue : il tombait dans l'annuaire, qui ne contient
+aucune entrée Pulse Chat, et l'envoi échouait sur un « Could not resolve »
+alors que le canal existe. La règle de routage vit désormais chez le plugin
+qui possède la syntaxe, au lieu d'une copie modifiée du cœur d'Hermes qu'il
+faut réappliquer à chaque version.
+
+Le slug **n'est pas validé** ici : l'app est la seule autorité sur l'existence
+d'un canal et sur le droit d'y écrire (404). Un motif de slug codé dans le
+plugin serait une seconde règle à tenir d'accord avec l'app.
+
+**Hermes plus ancien** : le kwarg est inconnu de `PlatformEntry` et
+`register_platform` le fait remonter en `TypeError`. Le plugin **réessaie sans
+lui** et journalise un avertissement — sans ce repli, le bot ne perdrait pas
+le routage, il perdrait l'enregistrement de la plateforme entière. Dans ce
+mode dégradé, un `send_message` / une livraison de cron `deliver=` vers
+`pulse_chat:<slug>` échoue ; **les réponses dans le canal ne sont pas
+affectées** (elles passent par le WebSocket et `POST /api/agent/messages`).
+
+> ⚠️ Depuis **v2026.9.7**, Hermes n'expose plus `send_message` comme outil
+> appelable par le modèle (`toolsets.py` : « there is deliberately no
+> agent-callable send_message tool »). Le parseur sert donc les chemins **sans
+> modèle dans la boucle** : cron `deliver=`, CLI, `react`/`unreact`.
+> Réexposer la capacité au modèle est une décision séparée, à prendre côté
+> plugin.
+
 ## Installation (machine du bot)
 
 ```bash
