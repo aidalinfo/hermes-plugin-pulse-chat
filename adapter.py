@@ -51,6 +51,11 @@ from .approvals import (
     parse_approval_reply,
     refusal,
 )
+from .questions import (
+    build_question_payload,
+    build_question_retire_payload,
+    parse_question_reply,
+)
 from .artifacts import (
     build_artifact_payload,
     default_artifact_id,
@@ -123,12 +128,28 @@ except ImportError:  # pragma: no cover - Hermes trop ancien / hors gateway
     # qu'il reprenne son invite texte — cf. le commentaire la-bas.
     resolve_gateway_approval = None  # type: ignore[assignment]
 
+try:  # Primitive ``clarify`` d'Hermes (question posee a l'humain)
+    from tools.clarify_gateway import resolve_gateway_clarify
+except ImportError:  # pragma: no cover - Hermes trop ancien / hors gateway
+    # Import GARDE, meme raison que ``resolve_gateway_approval`` juste au-dessus :
+    # sans lui tout l'import du plugin echouerait et le bot perdrait le chat
+    # entier. L'absence est traitee dans ``send_clarify``, qui rend alors la
+    # main a Hermes pour qu'il reprenne son invite texte numerotee.
+    resolve_gateway_clarify = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 #: Correlations ``requestId -> session_key`` retenues en attendant la decision.
 #: Bornee : le garde-fou d'Hermes abandonne au bout de son propre delai (300 s
 #: par defaut) et la trame correspondante n'arrivera parfois jamais.
 _MAX_GATEWAY_APPROVALS = 100
+
+#: Correlations ``clarify_id -> channel_slug`` des questions posees en carte.
+#: Bornee pour la meme raison : Hermes relache son attente de son cote (delai,
+#: /new, prose libre qui supplante la question) et la reponse n'arrivera
+#: parfois jamais. ``retire_clarify_card`` ne recoit PAS le chat_id — c'est
+#: cette table qui le retrouve, sans quoi le retrait ne saurait pas ou poster.
+_MAX_CLARIFY_CARDS = 100
 
 _HTTP_TIMEOUT = 15.0
 _WS_CONNECT_TIMEOUT = 30.0
@@ -387,6 +408,11 @@ class PulseChatAdapter(BasePlatformAdapter):
         # et c'est ``resolve_gateway_approval`` qui le relache. On ne garde donc
         # que de quoi retrouver la session au retour de la decision.
         self._gateway_approvals: "OrderedDict[str, str]" = OrderedDict()
+        # Questions posees en CARTE : clarify_id -> channel_slug. Rien a
+        # debloquer ici non plus — l'attente vit dans le process Hermes
+        # (``tools/clarify_gateway``), et c'est ``resolve_gateway_clarify`` qui
+        # la relache depuis ``_handle_question_reply``.
+        self._clarify_cards: "OrderedDict[str, str]" = OrderedDict()
 
     @property
     def name(self) -> str:
@@ -651,6 +677,11 @@ class PulseChatAdapter(BasePlatformAdapter):
                         self._handle_approval_reply(data)
                     except Exception:
                         logger.exception("Pulse Chat: erreur de traitement approval.reply")
+                elif data.get("type") == "question.reply":
+                    try:
+                        self._handle_question_reply(data)
+                    except Exception:
+                        logger.exception("Pulse Chat: erreur de traitement question.reply")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1551,6 +1582,177 @@ class PulseChatAdapter(BasePlatformAdapter):
             return
         if not future.done():
             future.set_result(reply)
+
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[List[Any]],
+        clarify_id: str,
+        session_key: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Rend la question d'Hermes sous forme de CARTE, pas d'invite texte.
+
+        Point d'extension du gateway (``BasePlatformAdapter.send_clarify``, le
+        jumeau de ``send_exec_approval``). Sans override, Hermes envoie sa liste
+        numerotee « tapez le numero » — lisible sur Telegram, et ici pire que ca :
+        ``classification.parse_tool`` lit « ❓ » + un mot comme un debut de tool
+        progress, si bien que la question atterrissait en ``ToolEvent`` intitule
+        « Quel », replie sous « 1 activite d'outil ». La seule facon de repondre
+        etait de retaper le numero dans le composeur.
+
+        Elle POSTE et rend la main — elle n'attend PAS la reponse, comme
+        ``send_exec_approval``. L'attente vit dans le process HERMES
+        (``tools/clarify_gateway``), et c'est ``resolve_gateway_clarify`` qui la
+        relache depuis ``_handle_question_reply``.
+
+        Tout echec est rendu en ``SendResult(success=False)`` plutot qu'en
+        exception : le runner d'Hermes replanifie ALORS LUI-MEME l'invite texte
+        (``run_turn_runner_clarify_delivery.text_fallback_coro``, qui teste que
+        notre ``send_clarify`` n'est pas celui de la base). On ne rappelle donc
+        surtout pas ``super()`` a la main sur ce chemin-la : ce serait DEUX
+        invites pour une question.
+
+        ⚠️ MULTI-SELECT exclu volontairement, et ce n'est pas un echec : la
+        carte ne sait cocher qu'un choix, et Hermes attend alors un tableau JSON
+        que seul son analyseur de texte (``_coerce_multi_select_text``) sait
+        construire. On DELEGUE a la base — qui envoie la liste numerotee ET
+        arme la capture de texte —, et on rend son resultat : un succes, pas un
+        repli. Rendre ``success=False`` ferait envoyer la meme liste deux fois.
+        """
+        if resolve_gateway_clarify is None:
+            # Poster la carte sans pouvoir debloquer le thread agent serait pire
+            # que l'invite texte : des boutons sans effet, et l'agent fige
+            # jusqu'au delai d'Hermes.
+            return SendResult(
+                success=False,
+                error="tools.clarify_gateway indisponible — pas de deblocage possible",
+            )
+
+        if choices and self._clarify_is_multi_select(clarify_id):
+            return await super().send_clarify(
+                chat_id=chat_id,
+                question=question,
+                choices=choices,
+                clarify_id=clarify_id,
+                session_key=session_key,
+                metadata=metadata,
+            )
+
+        payload = build_question_payload(
+            channel_slug=str(chat_id),
+            # Le ``clarify_id`` d'Hermes est repris TEL QUEL : c'est lui qui
+            # debloque le thread agent. En regenerer un (comme le fait
+            # ``send_exec_approval`` pour le garde-fou, dont Hermes ne donne
+            # aucun identifiant) rendrait la reponse irresoluble.
+            request_id=str(clarify_id),
+            question=question,
+            choices=choices,
+        )
+        # Correle AVANT de poster : l'app peut repondre avant que le POST ne
+        # retourne (question deja repondue, rejouee telle quelle) et la trame
+        # arriverait sans destinataire. Le slug sert aussi au RETRAIT, qui ne
+        # recoit pas de chat_id.
+        self._clarify_cards[str(clarify_id)] = str(chat_id)
+        while len(self._clarify_cards) > _MAX_CLARIFY_CARDS:
+            self._clarify_cards.popitem(last=False)
+
+        result = await self._post_agent_message(payload, str(clarify_id))
+        if not result.success:
+            self._clarify_cards.pop(str(clarify_id), None)
+            logger.warning(
+                "Pulse Chat: carte de question non postee (%s) — %s ; "
+                "Hermes reprend l'invite texte",
+                clarify_id,
+                getattr(result, "error", None),
+            )
+        return result
+
+    @staticmethod
+    def _clarify_is_multi_select(clarify_id: str) -> bool:
+        """Le drapeau multi-select vit sur l'entree, pas dans la signature.
+
+        ``send_clarify`` ne le recoit pas : Hermes l'a range sur
+        ``_ClarifyEntry.multi_select`` pour garder la signature compatible avec
+        les adaptateurs existants, et sa propre implementation de base va le
+        relire la. On fait pareil, avec la meme garde large — un interne de
+        module qui bouge ne doit pas faire perdre la question, seulement son
+        rendu en carte.
+        """
+        try:
+            from tools import clarify_gateway as _cg
+
+            with _cg._lock:  # type: ignore[attr-defined]
+                entry = _cg._entries.get(clarify_id)  # type: ignore[attr-defined]
+                return bool(getattr(entry, "multi_select", False))
+        except Exception:
+            return False
+
+    async def retire_clarify_card(self, clarify_id: str, notice: str) -> None:
+        """Referme une carte dont la question s'est eteinte SANS clic.
+
+        Appelee par le gateway quand il relache l'attente (delai, ``/new``,
+        prose libre qui supplante la question). Sans elle, la carte continuerait
+        d'afficher ses boutons : un chemin de reponse que la question relachee
+        ne peut plus accepter, et un clic qui ne dirait rien —
+        ``resolve_gateway_clarify`` rendant simplement ``False``. C'est
+        exactement la panne muette que cette carte existe pour supprimer.
+
+        ⚠️ Ne leve JAMAIS : le gateway la planifie sans attendre son resultat, et
+        une exception ici remonterait dans une tache detachee. Une carte qu'on
+        n'a pas su refermer reste affichee en attente — soit le comportement
+        d'avant cette methode.
+
+        ``notice`` n'est pas transmis : cf. ``build_question_retire_payload``.
+        """
+        channel_slug = self._clarify_cards.pop(str(clarify_id), None)
+        if channel_slug is None:
+            # Jamais posee en carte (multi-select, repli texte), ou deja
+            # refermee : rien a retirer.
+            return
+        try:
+            result = await self._post_agent_message(
+                build_question_retire_payload(channel_slug, str(clarify_id)),
+                str(clarify_id),
+            )
+            if not result.success:
+                logger.info(
+                    "Pulse Chat: retrait de la carte de question %s non poste — %s",
+                    clarify_id,
+                    getattr(result, "error", None),
+                )
+        except Exception:
+            logger.exception("Pulse Chat: retrait de la carte de question en echec")
+
+    def _handle_question_reply(self, data: Dict[str, Any]) -> None:
+        """Trame ``question.reply`` -> deblocage du thread agent chez Hermes."""
+        reply = parse_question_reply(data)
+        if reply is None:
+            logger.warning("Pulse Chat: trame question.reply inexploitable ignoree")
+            return
+        # La carte est terminale des qu'une reponse arrive : plus rien a
+        # retirer. Depile AVANT de resoudre — un retrait planifie entre-temps ne
+        # doit pas poster un « expire » sur une question repondue.
+        self._clarify_cards.pop(reply["requestId"], None)
+        if resolve_gateway_clarify is None:  # pragma: no cover - garde d'import
+            logger.warning(
+                "Pulse Chat: reponse recue pour %s mais tools.clarify_gateway absent",
+                reply["requestId"],
+            )
+            return
+        if not resolve_gateway_clarify(reply["requestId"], reply["answer"]):
+            # Deux causes, indistinguables ici et sans consequence : Hermes a
+            # deja relache son attente (delai, /new), ou le bot a redemarre
+            # depuis — l'entree vit en MEMOIRE de process, elle ne survit pas.
+            # C'est la seule trace qu'un humain a bien repondu, mais apres la
+            # fin. Le TEXTE de la reponse n'est pas journalise : il peut porter
+            # du contenu client.
+            logger.info(
+                "Pulse Chat: reponse pour %s sans attente cote Hermes "
+                "(question deja relachee ou bot redemarre)",
+                reply["requestId"],
+            )
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """No-op V1 (pas d'indicateur de frappe cote app)."""
