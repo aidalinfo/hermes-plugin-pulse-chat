@@ -148,6 +148,52 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
   (Hermes trop ancien), la carte n'est pas postée du tout : des boutons qu'on ne
   saurait pas dénouer figeraient l'agent.
 
+### Faire valider un plan ou un livrable (`pulse_request_approval`)
+
+Le premier **outil** que le plugin enregistre lui-même (`ctx.register_tool`,
+présent dès v2026.8.3) — tout le reste passe par l'adaptateur ou par le MCP de
+l'app. L'agent soumet son plan ou son livrable ; l'app le route vers les
+**approbateurs** désignés pour lui dans son organisation (Réglages → Agents),
+et l'outil attend leur décision.
+
+```
+pulse_request_approval(title, body)            # outil, toolset "pulse_chat"
+    -> POST {kind: "gate_request", requestId: gate-<hex>, title, body}
+_handle_gate_reply(frame)                      # trame WS gate.reply
+    -> attente active : l'outil rend {status, granted, comment}
+    -> AUCUNE attente  : décision injectée comme MessageEvent entrant
+```
+
+Quatre choses qui ne se devinent pas :
+
+- **Le canal n'est pas un paramètre.** Il est lu dans
+  `gateway.session_context` (`HERMES_SESSION_CHAT_ID`, `ContextVar`
+  task-local) : le modèle ne peut pas soumettre au nom d'une conversation où il
+  n'est pas.
+- **L'attente est bornée par Hermes, pas par nous.** `model_tools._run_async`
+  coupe un outil asynchrone à **300 s** sur le chemin de la passerelle.
+  L'outil attend donc `GATE_WAIT_SECONDS` (270 s), puis rend `pending` en
+  disant à l'agent de s'arrêter. La demande, elle, **n'expire jamais** côté
+  app : la décision tardive arrive en **message entrant** `[Approbation] …`,
+  le même chemin qu'après un redémarrage du bot, où l'attente a disparu avec le
+  process. Dédoublonnée : un rejeu au `hello` ne fait pas exécuter deux fois le
+  même plan.
+- **Autre boucle, autre Future.** Le handler tourne sur la boucle que
+  `_run_async` lui ouvre dans un thread, pas sur celle du WebSocket : l'attente
+  est un `concurrent.futures.Future` (sûre entre threads), et le POST est
+  planifié sur la boucle du WebSocket (`run_coroutine_threadsafe`).
+- **Nom préfixé.** `register_tool` sans `override=True` face à un nom déjà pris
+  rend `None` sans lever : `request_approval` nu risquerait la collision avec
+  la machinerie d'approbation que le cœur d'Hermes construit. Un `None` est
+  journalisé.
+
+L'outil est annoncé au modèle par sa **description** et par `platform_hint` ;
+le mode d'emploi détaillé est un skill enregistré par le plugin
+(`skills/approvals/SKILL.md`, résolu en `pulse-chat:approvals`) — **jamais
+annoncé** dans `<available_skills>`, d'où le fait que les deux textes le
+nomment. Un refus de l'app (`no_approver_configured`, **422**) est lu dans le
+corps de la réponse et rendu tel quel à l'agent.
+
 ### Router un envoi vers un canal Pulse Chat
 
 Le plugin déclare son propre parseur de cible
