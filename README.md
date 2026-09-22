@@ -119,6 +119,35 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
   hoquet inexplicable. `decode_audio_frame()` est la définition exécutable du
   format — l'app la réimplémente en TypeScript d'après elle.
 
+- **Questions de l'agent en CARTE** (`questions.py`, `send_clarify`) : quand
+  Hermes pose une question à l'humain (primitive `clarify`) et bloque son thread
+  en attendant, l'adaptateur poste une carte à boutons dans le fil plutôt que de
+  laisser Hermes rendre son invite texte (« ❓ … / 1. … / Reply with the
+  number… »). Le point d'extension est le **jumeau** de `send_exec_approval`, et
+  il manquait pour la même raison — le repli texte arrivait ici en `ToolEvent`
+  intitulé du premier mot de la question, replié sous « 1 activité d'outil ».
+
+  Trois méthodes, et rien d'autre :
+
+  ```
+  send_clarify(chat_id, question, choices, clarify_id, session_key)
+      -> POST {kind: "question_request", requestId: <clarify_id>, question, choices}
+  retire_clarify_card(clarify_id, notice)      # Hermes a relâché son attente
+      -> POST {kind: "question_retire", requestId: <clarify_id>}
+  _handle_question_reply(frame)                # trame WS question.reply
+      -> resolve_gateway_clarify(clarify_id, answer)   # débloque le thread agent
+  ```
+
+  `requestId` **EST** le `clarify_id` : lui seul dénoue l'attente. `answer` est
+  le libellé **brut** du choix, suffixe « (Recommended) » compris — c'est l'app
+  qui le retire à l'affichage seulement. Le **multi-select** est délégué à la
+  base (liste numérotée + capture de texte) : la carte ne coche qu'un choix.
+  Tout échec de POST rend `SendResult(success=False)` et c'est le runner
+  d'Hermes qui replanifie son invite texte — on ne rappelle jamais `super()`
+  soi-même, ce serait deux invites pour une question. Sans `tools.clarify_gateway`
+  (Hermes trop ancien), la carte n'est pas postée du tout : des boutons qu'on ne
+  saurait pas dénouer figeraient l'agent.
+
 ### Router un envoi vers un canal Pulse Chat
 
 Le plugin déclare son propre parseur de cible
