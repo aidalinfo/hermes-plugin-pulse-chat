@@ -59,12 +59,15 @@ MAX_BODY_LENGTH = 4000
 DECISIONS = ("approved", "changes_requested", "denied")
 
 GATE_TOOL_DESCRIPTION = (
-    "Soumet ton PLAN ou ton LIVRABLE a l'approbation des personnes designees pour "
+    "Soumet ton LIVRABLE ou ton PLAN a l'approbation des personnes designees pour "
     "toi dans Pulse Chat, et ATTEND leur decision avant de continuer. A appeler : "
-    "(1) AVANT d'engager une action couteuse, irreversible ou visible par des tiers "
-    "(envoyer, publier, supprimer, modifier des donnees reelles) — soumets le plan ; "
-    "(2) quand tu remets un livrable qu'on t'a demande de faire valider (compte "
-    "rendu, document, proposition) — soumets le livrable. Le canal est celui de la "
+    "(1) quand tu remets un livrable a faire valider (compte rendu, document, "
+    "proposition, rapport) — soumets le livrable ; (2) AVANT d'executer un plan "
+    "couteux ou difficile a defaire (ecraser des documents, retraiter des donnees "
+    "reelles, traitement long) — soumets le plan. Ce N'EST PAS l'accord d'un envoi "
+    "exterieur par connecteur (courriel, GitHub…) : celui-la appartient au "
+    "proprietaire du compte, et un `approved` ici ne leve pas un refus "
+    "`connector_approval_required`. Le canal est celui de la "
     "conversation en cours : tu ne le passes pas. Issue : `approved` (continue), "
     "`changes_requested` (applique `comment` puis resoumets), `denied` (arrete-toi "
     "et dis-le), `pending` (personne n'a encore tranche : ARRETE-TOI, dis a l'humain "

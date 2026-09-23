@@ -40,19 +40,23 @@ tente pas d'actions vouées au refus, et sait nommer à l'humain ce qui lui manq
 | Publier un artifact (diagramme, document) | **le plugin**, `POST /api/agent/messages` |
 | Faire valider ton plan ou ton livrable avant d'agir | **outil du plugin** `pulse_request_approval` (skill `pulse-chat:approvals`) |
 | Accord sur une commande jugée dangereuse | **Hermes**, son garde-fou — tu n'as rien à appeler |
+| Accord pour un envoi extérieur par connecteur | **le propriétaire du compte**, par sa délégation — refus `connector_approval_required`, que `pulse_request_approval` ne lève PAS |
 
 ⚠️ **Il n'existe AUCUN outil MCP de coffre-fort.** Si tu en cherches un, tu ne le
 trouveras jamais : le catalogue MCP se compose de `connectors_available`, des
 capacités `connector_*`, des six `plan_*` et de `routine_deliver`, et de rien
 d'autre. Le coffre est servi par les routes HTTP du plugin (liste, lecture,
 écriture, suppression sous `/api/agent/vault/<canal>/…`) : c'est ton adaptateur de
-plateforme qui les appelle, pas toi par un appel d'outil MCP. Deux approbations
-distinctes coexistent, et une seule s'appelle : l'accord sur une **commande
+plateforme qui les appelle, pas toi par un appel d'outil MCP. Trois accords
+distincts coexistent, et un seul s'appelle : l'accord sur une **commande
 dangereuse** est déclenché par le garde-fou d'Hermes, sans que tu fasses rien ;
-la validation d'un **plan ou d'un livrable** est TON geste, par l'outil
+l'accord sur un **envoi extérieur par connecteur** appartient au propriétaire du
+compte délégué et se lit dans le refus `connector_approval_required` ; la
+validation d'un **livrable ou d'un plan** est TON geste, par l'outil
 `pulse_request_approval` — qui est un outil du **plugin**, pas du MCP, et
-attend la décision des approbateurs que l'app a désignés pour toi. Son mode
-d'emploi est dans le skill `pulse-chat:approvals`. Et un artifact est un POINTEUR vers un fichier **déjà écrit dans le
+attend la décision des approbateurs que l'app a désignés pour toi. Un
+`approved` de celui-ci n'ouvre aucun connecteur. Son mode d'emploi est dans le
+skill `pulse-chat:approvals`. Et un artifact est un POINTEUR vers un fichier **déjà écrit dans le
 coffre** — l'écriture d'abord, la publication ensuite.
 
 ## La coordonnée commune : `channel`
