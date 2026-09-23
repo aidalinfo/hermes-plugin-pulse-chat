@@ -157,12 +157,39 @@ l'app. L'agent soumet son plan ou son livrable ; l'app le route vers les
 et l'outil attend leur décision.
 
 ```
-pulse_request_approval(title, body)            # outil, toolset "pulse_chat"
-    -> POST {kind: "gate_request", requestId: gate-<hex>, title, body}
+pulse_request_approval(title, body?, reason?, steps?, scope?, impact?,
+                       risk?, reversible?, attachments?)   # outil, toolset "pulse_chat"
+    -> POST {kind: "gate_request", requestId: gate-<hex>, title, body, …rubriques}
+    -> 400 unrecognized_keys (app antérieure) : REPOSTE une fois en titre + corps
 _handle_gate_reply(frame)                      # trame WS gate.reply
     -> attente active : l'outil rend {status, granted, comment}
     -> AUCUNE attente  : décision injectée comme MessageEvent entrant
 ```
+
+**Rubriques structurées (≥ 1.9.0).** `reason` (pourquoi), `steps`
+(`[{label, command?}]`, dans l'ordre), `scope` (étiquettes), `impact`, `risk`
+(`low|medium|high`), `reversible` (booléen, omis = non annoncé) et
+`attachments` (références `vault:<chemin>` / `message:<id>`, jamais des
+octets) alimentent l'écran /approvals de l'app : stepper, pastilles de risque,
+pièces jointes téléchargeables par l'approbateur. Toutes facultatives ; `body`
+le devient dès qu'une rubrique est fournie. Le plugin **transporte** : il
+garde ce qui a la bonne forme et coupe aux bornes de l'app (`gates.py`, miroir
+de `shared/gates.ts`), il ne déduit rien et ne corrige pas une référence sans
+préfixe — c'est l'app qui la refuse (`gate_attachment_invalid_ref`) ou qui ne
+la résout pas (`gate_attachment_not_found`), et ce refus revient au modèle
+avec un conseil. Les **descriptions des paramètres** enseignent quand et
+comment les remplir : le skill n'étant jamais annoncé, c'est là que le modèle
+apprend.
+
+**Compatibilité.** Plugin ancien + app récente : rien ne change, la trame
+titre + corps est reçue comme avant. Plugin ≥ 1.9.0 + app antérieure : le
+schéma d'entrée de l'app est STRICT et refuse les rubriques en 400
+`unrecognized_keys` ; le plugin reposte alors **une fois** la même demande
+(même `requestId`) en titre + corps, rubriques repliées en Markdown
+(`legacy_payload`), pièces jointes seulement **nommées** (sans chemin). Seul ce
+refus-là déclenche le repli : un 400 qui porte un `code` n'est jamais
+contourné — reposter sans les pièces jointes livrerait à l'approbateur un
+dossier amputé.
 
 Quatre choses qui ne se devinent pas :
 

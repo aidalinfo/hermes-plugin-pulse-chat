@@ -20,6 +20,8 @@ import sys
 import threading
 import types
 
+import pytest
+
 from test_adapter_dedup import _load_adapter_module
 
 adapter_module = _load_adapter_module()
@@ -80,6 +82,25 @@ class _WsLoop:
         self.thread.join(timeout=2)
 
 
+@pytest.fixture(autouse=True)
+def _aucun_adaptateur_residuel():
+    """Isole les tests : ``_live_adapter()`` prend le PREMIER adaptateur
+    connecte du ``WeakSet``. Un adaptateur d'un test precedent, garde en vie par
+    un cycle (``adapter.open_gate = fake_open`` capture ``adapter``) jusqu'au
+    prochain passage du ramasse-miettes, restait « connecte » sur une boucle
+    deja arretee : l'outil y planifiait son POST et attendait pour toujours. Le
+    blocage dependait du moment ou le GC passait — donc de l'ordre et du nombre
+    de tests."""
+
+    def _deconnecter():
+        for a in list(adapter_module._LIVE_ADAPTERS):
+            a.is_connected = False
+
+    _deconnecter()
+    yield
+    _deconnecter()
+
+
 def _connected(adapter, loop):
     adapter._loop = loop
     adapter.is_connected = True
@@ -92,7 +113,7 @@ class TestOutil:
             _connected(adapter, ws_loop)
             seen = {}
 
-            async def fake_open(chat_id, request_id, title, body):
+            async def fake_open(chat_id, request_id, title, body, structured=None):
                 seen.update(chat_id=chat_id, title=title)
                 # La decision arrive par le WebSocket, sur SA boucle.
                 asyncio.get_running_loop().call_soon(
@@ -118,7 +139,7 @@ class TestOutil:
         with _WsLoop() as ws_loop:
             _connected(adapter, ws_loop)
 
-            async def fake_open(*_a):
+            async def fake_open(*_a, **_kw):
                 return None
 
             adapter.open_gate = fake_open
@@ -135,7 +156,7 @@ class TestOutil:
         with _WsLoop() as ws_loop:
             _connected(adapter, ws_loop)
 
-            async def fake_open(*_a):
+            async def fake_open(*_a, **_kw):
                 return adapter_module.refused_result("no_approver_configured", "Aucun approbateur")
 
             adapter.open_gate = fake_open
@@ -247,3 +268,97 @@ class TestEnregistrement:
 
         adapter_module.register(Ctx())
         assert Ctx.platform is not None
+
+
+class TestRubriquesEtRepli:
+    """Le transport des rubriques, et le repli face a une app ANTERIEURE."""
+
+    def _http_error(self, status, body):
+        import io
+        import urllib.error
+
+        return urllib.error.HTTPError(
+            "http://pulse-chat.test/api/agent/messages", status, "err", {}, io.BytesIO(json.dumps(body).encode())
+        )
+
+    def _run_open(self, adapter, responses, **kw):
+        posted = []
+
+        def fake_post(url, payload):
+            posted.append(payload)
+            outcome = responses.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        adapter._post_json = fake_post
+        body = kw.pop("body", "")
+        out = asyncio.run(adapter.open_gate("compta", "gate-1", "Plan", body, **kw))
+        return out, posted
+
+    def test_une_app_ancienne_recoit_la_demande_repliee_en_titre_et_corps(self):
+        adapter, _ = _adapter()
+        old_app = self._http_error(
+            400, {"statusMessage": "Payload agent invalide", "data": [{"code": "unrecognized_keys"}]}
+        )
+        out, posted = self._run_open(
+            adapter, [old_app, 200], structured={"steps": [{"label": "Redemarrer"}], "risk": "high"}
+        )
+        assert out is None
+        assert len(posted) == 2
+        assert "steps" in posted[0]
+        assert set(posted[1]) == {"kind", "channelSlug", "requestId", "title", "body"}
+        assert "Redemarrer" in posted[1]["body"]
+        # Meme requestId : une reemission reste idempotente cote app.
+        assert posted[1]["requestId"] == posted[0]["requestId"]
+
+    def test_une_piece_introuvable_nest_JAMAIS_contournee_par_le_repli(self):
+        adapter, _ = _adapter()
+        refus = self._http_error(
+            400, {"statusMessage": "Aucun fichier", "data": {"code": "gate_attachment_not_found"}}
+        )
+        out, posted = self._run_open(adapter, [refus], structured={"attachments": ["vault:absent.pdf"]})
+        assert len(posted) == 1
+        assert json.loads(out)["code"] == "gate_attachment_not_found"
+
+    def test_sans_rubrique_aucun_repli_meme_sur_un_champ_inconnu(self):
+        adapter, _ = _adapter()
+        old_app = self._http_error(400, {"data": [{"code": "unrecognized_keys"}]})
+        out, posted = self._run_open(adapter, [old_app], body="b")
+        assert len(posted) == 1
+        assert json.loads(out)["granted"] is False
+
+    def test_loutil_transporte_les_rubriques_et_accepte_un_corps_absent(self):
+        adapter, _ = _adapter()
+        with _WsLoop() as ws_loop:
+            _connected(adapter, ws_loop)
+            seen = {}
+
+            async def fake_open(chat_id, request_id, title, body, structured=None):
+                seen.update(body=body, structured=structured)
+                return adapter_module.refused_result("no_approver_configured", "x")
+
+            adapter.open_gate = fake_open
+            asyncio.run(
+                adapter_module._pulse_request_approval(
+                    {"title": "Plan", "steps": [{"label": "a", "command": "ls"}], "reversible": True}
+                )
+            )
+        assert seen["body"] == ""
+        assert seen["structured"] == {"steps": [{"label": "a", "command": "ls"}], "reversible": True}
+
+    def test_loutil_refuse_une_demande_vide_sans_rien_poster(self):
+        adapter, _ = _adapter()
+        with _WsLoop() as ws_loop:
+            _connected(adapter, ws_loop)
+            called = []
+
+            async def fake_open(*_a, **_kw):
+                called.append(1)
+                return None
+
+            adapter.open_gate = fake_open
+            out = json.loads(asyncio.run(adapter_module._pulse_request_approval({"title": "Plan"})))
+        assert called == []
+        assert out["code"] == "gate_body_required"
+        assert out["granted"] is False
