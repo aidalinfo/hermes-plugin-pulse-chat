@@ -2148,11 +2148,14 @@ def register(ctx):
             # n'existe pas a cette version. Il nomme l'outil ET le skill, qu'un
             # plugin ne peut pas annoncer autrement (``register_skill`` = chargement
             # explicite seulement).
-            "Approvals: before any costly, irreversible or externally visible "
-            "action (sending, publishing, deleting, changing real data), and when "
-            "you hand in a deliverable you were asked to have validated, call "
-            "pulse_request_approval with a one-line title and a self-contained "
-            "Markdown body, and act ONLY once it returns approved. On "
+            "Approvals: when you hand in a deliverable to be validated (report, "
+            "document, proposal), and before running a costly or hard-to-undo "
+            "plan (overwriting documents, reprocessing real data, long jobs), "
+            "call pulse_request_approval with a one-line title and a "
+            "self-contained Markdown body, and act ONLY once it returns approved. "
+            "It is NOT the consent for sending outside through a connector "
+            "(email, GitHub...): that belongs to the account owner, and approved "
+            "here never lifts connector_approval_required. On "
             "changes_requested, apply the comment and resubmit; on denied, stop; "
             "on pending, stop and tell the human you are waiting — the decision "
             "will reach you later as a message. Details: load the skill "
