@@ -32,15 +32,18 @@ Configuration (env > config.extra) :
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import mimetypes
 import os
+import pathlib
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import weakref
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -50,6 +53,20 @@ from .approvals import (
     gateway_options,
     parse_approval_reply,
     refusal,
+)
+from .gates import (
+    GATE_SKILL_NAME,
+    GATE_TOOL_DESCRIPTION,
+    GATE_TOOL_NAME,
+    GATE_TOOL_SCHEMA,
+    GATE_WAIT_SECONDS,
+    build_gate_payload,
+    decision_message_text,
+    parse_error_body,
+    parse_gate_reply,
+    pending_result,
+    refused_result,
+    tool_result,
 )
 from .questions import (
     build_question_payload,
@@ -159,6 +176,12 @@ _MEDIA_MAX_COUNT = 10
 # Dedup du rejeu serveur : cache borne des derniers message ids traites (un
 # ``message.created`` deja vu est re-acke mais PAS re-dispatche a l'agent).
 _DEDUP_MAX_IDS = 500
+
+#: Adaptateurs vivants de ce process. Le handler de ``pulse_request_approval``
+#: est une fonction de MODULE (``register_tool`` le recoit avant qu'aucun
+#: adaptateur n'existe) : c'est par ici qu'il retrouve celui qui tient le
+#: WebSocket. Faible, pour ne rien retenir d'un adaptateur que Hermes a jete.
+_LIVE_ADAPTERS: "weakref.WeakSet[Any]" = weakref.WeakSet()
 # Identite de l'emetteur : le serveur repond au ``hello`` par une trame
 # ``hello.ack`` portant un jeton OPAQUE lie a cette connexion. Le plugin le
 # memorise et le REJOINT a ses appels sortants (en-tete HTTP ci-dessous + champ
@@ -413,6 +436,17 @@ class PulseChatAdapter(BasePlatformAdapter):
         # (``tools/clarify_gateway``), et c'est ``resolve_gateway_clarify`` qui
         # la relache depuis ``_handle_question_reply``.
         self._clarify_cards: "OrderedDict[str, str]" = OrderedDict()
+        # Demandes d'approbation DELIBEREES (outil ``pulse_request_approval``) :
+        # requestId -> Future THREAD-SAFE. Un ``concurrent.futures.Future`` et
+        # non un ``asyncio.Future`` : le handler d'un outil asynchrone tourne
+        # sur une AUTRE boucle que celle du WebSocket (``model_tools._run_async``
+        # lui ouvre un thread et une boucle a lui), et une Future asyncio ne
+        # s'attend pas depuis une autre boucle que la sienne.
+        self._pending_gates: Dict[str, "concurrent.futures.Future[Dict[str, Any]]"] = {}
+        # Boucle du WebSocket, capturee a la connexion : c'est sur elle que le
+        # handler fait poster la demande.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        _LIVE_ADAPTERS.add(self)
 
     @property
     def name(self) -> str:
@@ -518,6 +552,7 @@ class PulseChatAdapter(BasePlatformAdapter):
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Ouvre le WebSocket vers l'app et demarre la boucle de reception."""
+        self._loop = asyncio.get_running_loop()
         if not self.base_url or not self.token:
             self._last_connect_retryable = False
             self._set_fatal_error(
@@ -682,6 +717,11 @@ class PulseChatAdapter(BasePlatformAdapter):
                         self._handle_question_reply(data)
                     except Exception:
                         logger.exception("Pulse Chat: erreur de traitement question.reply")
+                elif data.get("type") == "gate.reply":
+                    try:
+                        await self._handle_gate_reply(data)
+                    except Exception:
+                        logger.exception("Pulse Chat: erreur de traitement gate.reply")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1763,6 +1803,99 @@ class PulseChatAdapter(BasePlatformAdapter):
 
     # ── HTTP sortant ─────────────────────────────────────────────────────
 
+    # ── Demandes d'approbation DELIBEREES (pulse_request_approval) ──────
+
+    async def open_gate(self, chat_id: str, request_id: str, title: str, body: str) -> Optional[str]:
+        """POSTe la demande. Rend ``None`` si elle est ouverte, sinon le JSON de refus.
+
+        S'execute sur la boucle du WebSocket. Un refus de l'app est lu dans son
+        CORPS et rendu tel quel : ``no_approver_configured`` doit arriver a
+        l'agent avec sa raison, pas comme un « HTTP 422 » qu'il ne saurait pas
+        expliquer a l'humain.
+        """
+        payload = build_gate_payload(
+            channel_slug=chat_id, request_id=request_id, title=title, body=body
+        )
+        url = f"{self.base_url}/api/agent/messages"
+        try:
+            status = await asyncio.to_thread(self._post_json, url, payload)
+        except urllib.error.HTTPError as exc:
+            detail: Any = None
+            try:
+                detail = json.loads(exc.read().decode("utf-8"))
+            except Exception:
+                detail = None
+            err = parse_error_body(exc.code, detail)
+            logger.warning(
+                "Pulse Chat: demande d'approbation refusee (%s) — HTTP %s %s",
+                request_id,
+                exc.code,
+                err["code"],
+            )
+            return refused_result(err["code"], err["message"])
+        except Exception as exc:
+            logger.warning("Pulse Chat: demande d'approbation non postee (%s) — %s", request_id, exc)
+            return refused_result("not_sent", str(exc))
+        if status >= 400:
+            return refused_result("not_sent", f"HTTP {status}")
+        return None
+
+    async def _handle_gate_reply(self, data: Dict[str, Any]) -> None:
+        """Trame ``gate.reply`` : debloque l'outil qui attend, ou PREVIENT l'agent.
+
+        Deux cas, et le second n'est pas une anomalie :
+          - l'outil attend encore -> on resout sa Future, il rend la decision ;
+          - personne n'attend (fenetre de l'outil depassee, ou bot redemarre)
+            -> la decision est injectee comme un MESSAGE entrant ordinaire.
+            Se contenter de la journaliser laisserait l'agent arrete pour
+            toujours sur une demande que quelqu'un a pourtant tranchee — et
+            cette famille n'a delibere aucune echeance.
+        """
+        reply = parse_gate_reply(data)
+        if reply is None:
+            logger.warning("Pulse Chat: trame gate.reply inexploitable ignoree")
+            return
+        future = self._pending_gates.pop(reply["requestId"], None)
+        if future is not None and not future.done():
+            future.set_result(reply)
+            return
+
+        slug = reply["channelSlug"]
+        if not slug:
+            logger.warning("Pulse Chat: decision %s sans canal, ignoree", reply["requestId"])
+            return
+        # Dedup : le rejeu au hello peut renvoyer la meme decision. Deux
+        # messages « approuve » feraient executer deux fois le meme plan.
+        dedup_key = f"gate:{reply['requestId']}"
+        if dedup_key in self._seen_message_ids:
+            return
+        source = self._last_source.get(slug) or self.build_source(
+            chat_id=slug,
+            chat_name=reply["channelName"] or slug,
+            chat_type="group",
+            user_id=None,
+            user_name=reply["decidedBy"] or None,
+        )
+        event = build_message_event(
+            MessageEvent,
+            {
+                "text": decision_message_text(reply),
+                "message_type": MessageType.TEXT,
+                "source": source,
+                "message_id": dedup_key,
+                "media_urls": [],
+                "media_types": [],
+            },
+            None,
+        )
+        self._remember_message_id(dedup_key)
+        logger.info(
+            "Pulse Chat: decision %s pour %s sans attente active — remise a l'agent en message",
+            reply["decision"],
+            reply["requestId"],
+        )
+        await self.handle_message(event)
+
     async def _post_agent_message(
         self, payload: Dict[str, Any], hermes_id: str
     ) -> SendResult:
@@ -1891,6 +2024,101 @@ def validate_config(config) -> bool:
     return bool(url and token)
 
 
+def _live_adapter() -> Optional["PulseChatAdapter"]:
+    """L'adaptateur qui tient le WebSocket, ou ``None``."""
+    for adapter in list(_LIVE_ADAPTERS):
+        if getattr(adapter, "is_connected", False) and getattr(adapter, "_loop", None) is not None:
+            return adapter
+    return None
+
+
+async def _pulse_request_approval(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Handler de ``pulse_request_approval`` — rend TOUJOURS une chaine JSON.
+
+    Aucun chemin n'aboutit a ``granted: true`` sans une decision ``approved``
+    venue de l'app : un incident technique rend un refus, jamais un accord.
+
+    Le CANAL vient du contexte de session d'Hermes (``ContextVar`` task-local,
+    propagee au thread de l'outil), jamais d'un argument : le modele ne peut
+    pas soumettre une demande au nom d'une conversation ou il n'est pas.
+    """
+    try:
+        from gateway.session_context import get_session_env
+
+        chat_id = str(get_session_env("HERMES_SESSION_CHAT_ID", "") or "")
+    except Exception:
+        chat_id = ""
+    if not chat_id:
+        return refused_result("no_channel", "Aucune conversation Pulse Chat en cours")
+
+    adapter = _live_adapter()
+    if adapter is None or adapter._loop is None:
+        return refused_result("not_connected", "Pulse Chat est injoignable")
+
+    title = str(args.get("title") or "").strip()
+    body = str(args.get("body") or "").strip()
+    if not title or not body:
+        return refused_result("not_sent", "Le titre et le corps de la demande sont requis")
+
+    request_id = f"gate-{uuid.uuid4().hex}"
+    decision: "concurrent.futures.Future[Dict[str, Any]]" = concurrent.futures.Future()
+    # Armee AVANT le POST : une demande approuvee d'office recoit sa decision
+    # par le WebSocket avant meme la reponse HTTP.
+    adapter._pending_gates[request_id] = decision
+    try:
+        posted = asyncio.run_coroutine_threadsafe(
+            adapter.open_gate(chat_id, request_id, title, body), adapter._loop
+        )
+        refusal_json = await asyncio.wrap_future(posted)
+        if refusal_json is not None:
+            return refusal_json
+        try:
+            reply = await asyncio.wait_for(asyncio.wrap_future(decision), timeout=GATE_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            # La demande RESTE ouverte cote app ; la decision arrivera plus tard
+            # en message (``_handle_gate_reply``), puisqu'on retire l'attente.
+            return pending_result(request_id)
+        return tool_result(reply)
+    finally:
+        adapter._pending_gates.pop(request_id, None)
+
+
+def _register_gate_tool(ctx) -> None:
+    """Outil + skill d'approbation. Jamais bloquant pour la plateforme."""
+    try:
+        registered = ctx.register_tool(
+            name=GATE_TOOL_NAME,
+            # Le NOM de la plateforme : c'est ce qui verse l'outil dans le
+            # toolset ``hermes-pulse_chat`` a cote des outils coeur, sans
+            # configuration d'operateur (``toolsets.py``, vue derivee du registre).
+            toolset="pulse_chat",
+            schema=GATE_TOOL_SCHEMA,
+            handler=_pulse_request_approval,
+            is_async=True,
+            description=GATE_TOOL_DESCRIPTION,
+            emoji="🛂",
+        )
+        if registered is None:
+            # ``register_tool`` rend None quand le nom est deja pris : le dire,
+            # sinon l'outil manque sans qu'aucune trace ne l'explique.
+            _warn_once(
+                "gate_tool_shadowed",
+                f"Pulse Chat: l'outil {GATE_TOOL_NAME} n'a pas ete enregistre (nom deja pris ?)",
+            )
+    except Exception as exc:
+        _warn_once("gate_tool_failed", f"Pulse Chat: outil {GATE_TOOL_NAME} non enregistre — {exc}")
+
+    try:
+        skill_path = pathlib.Path(__file__).resolve().parent / "skills" / GATE_SKILL_NAME / "SKILL.md"
+        ctx.register_skill(
+            GATE_SKILL_NAME,
+            skill_path,
+            description="Quand et comment soumettre un plan ou un livrable a l'approbation (pulse_request_approval).",
+        )
+    except Exception as exc:
+        _warn_once("gate_skill_failed", f"Pulse Chat: skill {GATE_SKILL_NAME} non enregistre — {exc}")
+
+
 def register(ctx):
     """Point d'entree plugin : appele par le systeme de plugins Hermes."""
     entry = dict(
@@ -1914,7 +2142,21 @@ def register(ctx):
             "fenced code blocks. When users share documents, they arrive as "
             "presigned URLs embedded in the message text — fetch them with your "
             "tools when needed (links expire after about 15 minutes, so read "
-            "them promptly). Keep a professional, helpful tone with clients."
+            "them promptly). Keep a professional, helpful tone with clients.\n\n"
+            # Le SEUL texte qui atteint tout agent Pulse Chat sans
+            # configuration (v2026.8.3) : ``register_system_prompt_section``
+            # n'existe pas a cette version. Il nomme l'outil ET le skill, qu'un
+            # plugin ne peut pas annoncer autrement (``register_skill`` = chargement
+            # explicite seulement).
+            "Approvals: before any costly, irreversible or externally visible "
+            "action (sending, publishing, deleting, changing real data), and when "
+            "you hand in a deliverable you were asked to have validated, call "
+            "pulse_request_approval with a one-line title and a self-contained "
+            "Markdown body, and act ONLY once it returns approved. On "
+            "changes_requested, apply the comment and resubmit; on denied, stop; "
+            "on pending, stop and tell the human you are waiting — the decision "
+            "will reach you later as a message. Details: load the skill "
+            "pulse-chat:approvals."
         ),
     )
     # ``parse_target_ref_fn`` n'existe pas sur les Hermes anterieurs a
@@ -1937,3 +2179,4 @@ def register(ctx):
             "(>= v2026.8.13). Les reponses dans le canal ne sont pas affectees.",
         )
         ctx.register_platform(**entry)
+    _register_gate_tool(ctx)
