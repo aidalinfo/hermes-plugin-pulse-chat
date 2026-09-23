@@ -45,7 +45,7 @@ class TestNom:
         """Le canal vient du contexte de session : en faire un parametre ferait
         du choix du canal une sortie de LLM."""
         props = gates.GATE_TOOL_SCHEMA["parameters"]["properties"]
-        assert set(props) == {"title", "body"}
+        assert set(props) == {"title", "body", *gates.STRUCTURED_FIELDS}
         assert "channel" not in json.dumps(gates.GATE_TOOL_SCHEMA["parameters"])
 
     def test_lattente_reste_SOUS_le_plafond_dhermes(self):

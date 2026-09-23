@@ -61,6 +61,10 @@ from .gates import (
     GATE_TOOL_SCHEMA,
     GATE_WAIT_SECONDS,
     build_gate_payload,
+    has_structured,
+    is_unknown_fields_refusal,
+    legacy_payload,
+    structured_fields,
     decision_message_text,
     parse_error_body,
     parse_gate_reply,
@@ -1805,18 +1809,63 @@ class PulseChatAdapter(BasePlatformAdapter):
 
     # ── Demandes d'approbation DELIBEREES (pulse_request_approval) ──────
 
-    async def open_gate(self, chat_id: str, request_id: str, title: str, body: str) -> Optional[str]:
+    async def open_gate(
+        self,
+        chat_id: str,
+        request_id: str,
+        title: str,
+        body: str,
+        structured: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
         """POSTe la demande. Rend ``None`` si elle est ouverte, sinon le JSON de refus.
 
         S'execute sur la boucle du WebSocket. Un refus de l'app est lu dans son
         CORPS et rendu tel quel : ``no_approver_configured`` doit arriver a
         l'agent avec sa raison, pas comme un « HTTP 422 » qu'il ne saurait pas
         expliquer a l'humain.
+
+        Une app ANTERIEURE aux rubriques structurees refuse leurs champs en 400
+        (``unrecognized_keys``) : on reposte alors UNE fois la meme demande en
+        titre + corps (``legacy_payload``), rubriques repliees en Markdown. Seul
+        ce refus-la declenche le repli — un 400 portant un ``code`` (piece
+        jointe introuvable, prefixe manquant) est rendu a l'agent tel quel.
         """
         payload = build_gate_payload(
-            channel_slug=chat_id, request_id=request_id, title=title, body=body
+            channel_slug=chat_id,
+            request_id=request_id,
+            title=title,
+            body=body,
+            structured=structured,
         )
         url = f"{self.base_url}/api/agent/messages"
+        outcome = await self._post_gate(url, payload, request_id)
+        if outcome is None:
+            return None
+        status, detail = outcome
+        if has_structured(payload) and is_unknown_fields_refusal(status, detail):
+            logger.warning(
+                "Pulse Chat: l'app ne connait pas les rubriques d'approbation (%s) — "
+                "repli en titre + corps ; mettre l'app a jour",
+                request_id,
+            )
+            outcome = await self._post_gate(url, legacy_payload(payload), request_id)
+            if outcome is None:
+                return None
+            status, detail = outcome
+        if status < 0:
+            return refused_result("not_sent", str(detail))
+        err = parse_error_body(status, detail)
+        logger.warning(
+            "Pulse Chat: demande d'approbation refusee (%s) — HTTP %s %s",
+            request_id,
+            status,
+            err["code"],
+        )
+        return refused_result(err["code"], err["message"])
+
+    async def _post_gate(self, url: str, payload: Dict[str, Any], request_id: str):
+        """Un POST. ``None`` si accepte, sinon ``(status, corps_json)`` — status
+        ``-1`` pour un echec de transport (le « corps » est alors le message)."""
         try:
             status = await asyncio.to_thread(self._post_json, url, payload)
         except urllib.error.HTTPError as exc:
@@ -1825,19 +1874,12 @@ class PulseChatAdapter(BasePlatformAdapter):
                 detail = json.loads(exc.read().decode("utf-8"))
             except Exception:
                 detail = None
-            err = parse_error_body(exc.code, detail)
-            logger.warning(
-                "Pulse Chat: demande d'approbation refusee (%s) — HTTP %s %s",
-                request_id,
-                exc.code,
-                err["code"],
-            )
-            return refused_result(err["code"], err["message"])
+            return exc.code, detail
         except Exception as exc:
             logger.warning("Pulse Chat: demande d'approbation non postee (%s) — %s", request_id, exc)
-            return refused_result("not_sent", str(exc))
+            return -1, str(exc)
         if status >= 400:
-            return refused_result("not_sent", f"HTTP {status}")
+            return status, None
         return None
 
     async def _handle_gate_reply(self, data: Dict[str, Any]) -> None:
@@ -2057,8 +2099,16 @@ async def _pulse_request_approval(args: Dict[str, Any], **_kwargs: Any) -> str:
 
     title = str(args.get("title") or "").strip()
     body = str(args.get("body") or "").strip()
-    if not title or not body:
-        return refused_result("not_sent", "Le titre et le corps de la demande sont requis")
+    # Transportees, pas jugees : l'app valide (prefixe des pieces jointes,
+    # references resolubles, bornes). Le plugin ne fait que les mettre en forme.
+    structured = structured_fields(args)
+    if not title:
+        return refused_result("not_sent", "Le titre de la demande est requis")
+    if not body and not structured:
+        return refused_result(
+            "gate_body_required",
+            "Donne un corps (`body`) ou au moins une rubrique (`reason`, `steps`…)",
+        )
 
     request_id = f"gate-{uuid.uuid4().hex}"
     decision: "concurrent.futures.Future[Dict[str, Any]]" = concurrent.futures.Future()
@@ -2067,7 +2117,7 @@ async def _pulse_request_approval(args: Dict[str, Any], **_kwargs: Any) -> str:
     adapter._pending_gates[request_id] = decision
     try:
         posted = asyncio.run_coroutine_threadsafe(
-            adapter.open_gate(chat_id, request_id, title, body), adapter._loop
+            adapter.open_gate(chat_id, request_id, title, body, structured=structured), adapter._loop
         )
         refusal_json = await asyncio.wrap_future(posted)
         if refusal_json is not None:
