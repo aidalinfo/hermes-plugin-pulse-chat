@@ -1,6 +1,6 @@
 ---
 name: pulse-chat
-description: Se servir de Pulse Chat depuis un agent Hermes — les outils MCP de /mcp-hermes (connectors_available et les 20 capacités connector_*, le plan de travail plan_*, routine_deliver), ce qui n'en est PAS (le coffre-fort passe par les routes HTTP du plugin, les approbations de COMMANDE par le garde-fou d'Hermes, la validation d'un plan ou d'un livrable par l'outil du plugin pulse_request_approval, les artifacts par POST /api/agent/messages), le piège plan_* contre tasks_*, brouillon contre envoi réel, aperçu contre corps de courriel, les pièces jointes par référence préfixée bornées à 3 Mo, et quoi faire d'un refus. À charger dès qu'un canal Pulse Chat demande d'agir sur un compte tiers délégué (courriel, agenda, To Do, Teams, GitHub), de tenir un plan de tâches, de déposer un fichier, ou de répondre à une routine.
+description: Se servir de Pulse Chat depuis un agent Hermes — les outils MCP de /mcp-hermes (connectors_available et les 20 capacités connector_*, le plan de travail plan_*, routine_deliver), ce qui n'en est PAS (l'écriture au coffre-fort et la publication d'un fichier dans la conversation passent par les outils du plugin pulse_vault_write et pulse_publish_artifact, les approbations de COMMANDE par le garde-fou d'Hermes, la validation d'un plan ou d'un livrable par l'outil du plugin pulse_request_approval), le piège plan_* contre tasks_*, brouillon contre envoi réel, aperçu contre corps de courriel, les pièces jointes par référence préfixée bornées à 3 Mo, et quoi faire d'un refus. À charger dès qu'un canal Pulse Chat demande d'agir sur un compte tiers délégué (courriel, agenda, To Do, Teams, GitHub), de tenir un plan de tâches, de déposer un fichier, ou de répondre à une routine.
 ---
 
 > ⚠️ **Format non vérifié.** Cette skill a été écrite sans pouvoir inspecter
@@ -36,18 +36,23 @@ tente pas d'actions vouées au refus, et sait nommer à l'humain ce qui lui manq
 | Compte tiers délégué (courriel, agenda, To Do, Teams, GitHub) | **outils MCP** `connector_*` |
 | Ton plan de travail (tâches) | **outils MCP** `plan_*` |
 | Livrer la réponse d'une routine | **outil MCP** `routine_deliver` |
-| Coffre-fort d'un canal (lire/écrire un fichier) | **le plugin**, routes HTTP `…/api/agent/vault/…` — **aucun outil MCP** |
-| Publier un artifact (diagramme, document, **fichier** PDF/tableur/image) | **le plugin**, `POST /api/agent/messages` — un fichier binaire est `artifactKind: "file"` + `path` (déjà écrit au coffre), jamais un `content` ; republier le même `artifactId` crée une nouvelle version |
+| Lire le coffre-fort d'un canal | **outils MCP** `channel_vault_list`, `channel_vault_read` |
+| Écrire un fichier au coffre-fort (PDF, tableur, image, texte…) | **outil du plugin** `pulse_vault_write` (`path` + `local_path`, ou `content` pour un texte) — **aucun outil MCP** |
+| Montrer un fichier ou un document dans la conversation | **outil du plugin** `pulse_publish_artifact` — `kind: "file"` + `path` pour un fichier déjà écrit au coffre, jamais un `content` ; republier le même `artifact_id` crée une nouvelle version |
 | Faire valider ton plan ou ton livrable avant d'agir | **outil du plugin** `pulse_request_approval` (skill `pulse-chat:approvals`) |
 | Accord sur une commande jugée dangereuse | **Hermes**, son garde-fou — tu n'as rien à appeler |
 | Accord pour un envoi extérieur par connecteur | **le propriétaire du compte**, par sa délégation — refus `connector_approval_required`, que `pulse_request_approval` ne lève PAS |
 
-⚠️ **Il n'existe AUCUN outil MCP de coffre-fort.** Si tu en cherches un, tu ne le
-trouveras jamais : le catalogue MCP se compose de `connectors_available`, des
-capacités `connector_*`, des six `plan_*` et de `routine_deliver`, et de rien
-d'autre. Le coffre est servi par les routes HTTP du plugin (liste, lecture,
-écriture, suppression sous `/api/agent/vault/<canal>/…`) : c'est ton adaptateur de
-plateforme qui les appelle, pas toi par un appel d'outil MCP. Trois accords
+⚠️ **Il n'existe AUCUN outil MCP d'ÉCRITURE au coffre-fort.** Le catalogue MCP le
+LIT (`channel_vault_list`, `channel_vault_read`) mais n'y écrit pas : pour
+déposer un fichier, tu appelles l'outil du **plugin** `pulse_vault_write`, qui lit
+le fichier sur ton disque (`local_path`) et l'envoie — jamais d'octets en base64
+dans un argument. **Écrire n'affiche RIEN dans la conversation** : pour que les
+humains voient et téléchargent le fichier, appelle ENSUITE
+`pulse_publish_artifact` avec `kind: "file"` et le même `path`. N'annonce pas à
+l'humain qu'un fichier est disponible tant que cet outil n'a pas rendu
+`published`. Comme `pulse_request_approval`, aucun des deux ne prend de canal :
+c'est celui de la conversation en cours. Trois accords
 distincts coexistent, et un seul s'appelle : l'accord sur une **commande
 dangereuse** est déclenché par le garde-fou d'Hermes, sans que tu fasses rien ;
 l'accord sur un **envoi extérieur par connecteur** appartient au propriétaire du
@@ -176,8 +181,9 @@ Trois règles, chacune un refus si elle est enfreinte :
    pièce **en attente** (message pas encore envoyé) n'existe pas pour toi : demande
    à l'humain d'envoyer son message.
 
-Un fichier que tu FABRIQUES suit la même voie : écris-le dans le coffre (routes de
-coffre du plugin — pas un outil MCP), puis désigne-le par `vault:<ce chemin>`.
+Un fichier que tu FABRIQUES suit la même voie : écris-le dans le coffre avec
+`pulse_vault_write` (outil du plugin — pas un outil MCP), puis désigne-le par la
+`reference` qu'il te rend (`vault:<ce chemin>`).
 
 ### Agenda et tâches personnelles
 

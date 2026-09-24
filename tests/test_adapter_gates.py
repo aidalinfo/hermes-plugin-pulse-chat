@@ -215,14 +215,16 @@ class TestDecisionTardive:
 
 class TestEnregistrement:
     def _ctx(self):
-        calls = {"tool": None, "skill": None, "platform": None}
+        # Les outils par NOM : le plugin en enregistre plusieurs, et ne garder
+        # que le dernier ferait tester l'outil de coffre a la place de celui-ci.
+        calls = {"tools": {}, "skill": None, "platform": None}
 
         class Ctx:
             def register_platform(self, **kw):
                 calls["platform"] = kw
 
             def register_tool(self, **kw):
-                calls["tool"] = kw
+                calls["tools"][kw["name"]] = kw
                 return object()
 
             def register_skill(self, name, path, description=""):
@@ -234,8 +236,7 @@ class TestEnregistrement:
     def test_enregistre_loutil_prefixe_dans_le_toolset_de_la_plateforme(self):
         ctx, calls = self._ctx()
         adapter_module.register(ctx)
-        tool = calls["tool"]
-        assert tool["name"] == "pulse_request_approval"
+        tool = calls["tools"]["pulse_request_approval"]
         assert tool["toolset"] == "pulse_chat"
         assert tool["is_async"] is True
 
