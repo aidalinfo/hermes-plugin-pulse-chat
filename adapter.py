@@ -1251,7 +1251,7 @@ class PulseChatAdapter(BasePlatformAdapter):
     ) -> Optional[str]:
         """Publie un artifact dans la conversation.
 
-        ``kind`` : mermaid | markdown | svg | html | drawio.
+        ``kind`` : mermaid | markdown | svg | html | drawio | file.
 
         Un artifact est un POINTEUR vers un fichier du coffre : le contenu
         n'existe qu'une fois, dans le coffre du canal. Deux usages :
@@ -1265,10 +1265,25 @@ class PulseChatAdapter(BasePlatformAdapter):
         existante au lieu d'en ajouter une. Par defaut il est derive du TITRE,
         ce qui rend le comportement attendu automatique.
 
+        ``kind="file"`` est le cas du FICHIER QUELCONQUE (PDF, tableur, archive,
+        image...) : sa carte se telecharge (PDF et images s'apercoivent en
+        panneau). Il exige ``path=`` — un fichier binaire ne se passe pas par
+        ``content=``, qui est encode en UTF-8 avant ecriture. Ecrire d'abord avec
+        ``vault_write``, publier ensuite. Republier le MEME ``artifact_id`` sur
+        un fichier reecrit cree une nouvelle version : l'app archive l'etat
+        precedent (versionnement du coffre).
+
         Retourne l'``artifact_id`` utilise, ou ``None`` en cas d'echec.
         """
         if (content is None) == (path is None):
             raise ValueError("fournir soit `content`, soit `path` — jamais les deux")
+        if kind == "file" and content is not None:
+            # Refuse ICI plutot que cote app : `content` part en UTF-8, donc un
+            # binaire y arriverait corrompu SANS erreur — l'agent croirait avoir
+            # publie son PDF, et le telechargement rendrait un fichier illisible.
+            raise ValueError(
+                "kind='file' attend `path=` (ecrire d'abord le fichier avec vault_write)"
+            )
 
         artifact_id = (
             artifact_id

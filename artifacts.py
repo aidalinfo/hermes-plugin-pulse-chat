@@ -21,7 +21,14 @@ import hashlib
 from typing import Any, Dict, Optional
 
 #: Types reconnus par l'app.
-ARTIFACT_KINDS = ("mermaid", "markdown", "svg", "html", "drawio")
+#: ``file`` est le seul qui ne se RENDE pas : n'importe quel fichier deja ecrit
+#: dans le coffre (PDF, tableur, archive...), publie pour etre TELECHARGE depuis
+#: le fil (PDF et images s'apercoivent aussi dans le panneau, decision cote app).
+#: Il exige donc ``path=`` — voir ``publish_artifact``. Jumeau de
+#: ``ARTIFACT_KINDS`` dans shared/artifacts.ts : sans cette valeur ici, un agent
+#: qui publie un PDF se fait refuser par SON PROPRE plugin (ValueError), et
+#: l'app ne voit jamais passer la demande.
+ARTIFACT_KINDS = ("mermaid", "markdown", "svg", "html", "drawio", "file")
 
 #: Bornes miroir de shared/artifacts.ts.
 MAX_ARTIFACT_CONTENT_LENGTH = 400_000

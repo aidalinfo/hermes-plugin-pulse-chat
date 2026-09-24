@@ -103,6 +103,31 @@ class TestArtifactPayload:
             assert payload["artifactKind"] == kind
 
 
+class TestFileKind:
+    def test_le_type_fichier_est_annonce(self):
+        # Le miroir de shared/artifacts.ts. Sans cette valeur ici, un agent qui
+        # publie un PDF se fait refuser par SON PROPRE plugin (ValueError), et
+        # l'app ne voit jamais passer la demande.
+        assert "file" in artifacts.ARTIFACT_KINDS
+
+    def test_payload_d_un_pdf_par_chemin(self):
+        payload = artifacts.build_artifact_payload(
+            channel_slug="demo",
+            artifact_id="devis-client",
+            kind="file",
+            path="livrables/devis-v4.pdf",
+            title="Devis V4",
+        )
+        assert payload == {
+            "channelSlug": "demo",
+            "kind": "artifact",
+            "artifactId": "devis-client",
+            "artifactKind": "file",
+            "title": "Devis V4",
+            "path": "livrables/devis-v4.pdf",
+        }
+
+
 class TestDefaultArtifactId:
     def test_stable_pour_un_meme_titre(self):
         a = artifacts.default_artifact_id("mermaid", "Architecture reseau")
