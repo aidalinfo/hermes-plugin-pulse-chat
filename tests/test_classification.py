@@ -160,3 +160,47 @@ def test_unknown_emoji_prefix_is_tool_event():
 def test_classify_returns_only_known_kinds():
     for content, is_edit in [("hello", False), ("hello", True), ("⏳ x", False)]:
         assert classify_outbound(content, is_edit=is_edit) in ("message", "tool_event")
+
+
+# ── Bloc terminal NU (bulle de progression rouverte apres une phrase) ────
+#
+# Contenus reels du canal `infrastructure` (2026-09-24, Vulcain) : Hermes omet
+# l'en-tete `💻 terminal` entre deux commandes terminal, et ne l'oublie pas
+# quand une phrase de l'agent referme la bulle de progression.
+
+BARE_TERMINAL_BUBBLES = [
+    "```\n/opt/data/infra/bin/infra-ssh slave05...\n```",
+    "```\n/opt/data/infra/bin/infra-ssh vm-ia '...\n```",
+    "```\n/opt/data/infra/bin/infra-ssh slave05...\n```\n"
+    "⚙️ mcp__coolify__deployment...\n⚙️ mcp__coolify__get_application...",
+    "```\n/opt/data/infra/bin/infra-ssh slave05...\n```\n⚙️ hindsight_retain...",
+    "```\nssh -i /opt/data/infra/keys/vulcain_e...\n``` (×3)",
+    "```\npython3 - <<'PY' ...\n```\n```\nsleep 15\n```",
+    "```\necho `date` ...\n```\n💻 terminal\n```\nls\n```",
+    "```\nsleep 15\n```\n",
+]
+
+
+@pytest.mark.parametrize("content", BARE_TERMINAL_BUBBLES)
+def test_bare_terminal_bubble_is_tool_event(content):
+    assert classify_outbound(content, is_edit=False) == "tool_event"
+    assert parse_tool(content) == {"tool": "terminal", "phase": "progress"}
+
+
+# La moindre ligne de prose, un langage sur la fence, un bloc de plusieurs
+# lignes ou un bloc qui n'ouvre pas la bulle : c'est une reponse.
+CODE_RESPONSES = [
+    "```\nnpm install\n```\nPuis relance le serveur.",
+    "```bash\nnpm install\n```",
+    "```\nligne 1\nligne 2\n```",
+    "```\n```",
+    "```\n\n```",
+    "```\nnpm install",
+    "Lance :\n```\nnpm install\n```",
+    "```\nnpm install\n```\n\n⚙️ tool...",
+]
+
+
+@pytest.mark.parametrize("content", CODE_RESPONSES)
+def test_code_response_is_not_bare_terminal(content):
+    assert classify_outbound(content, is_edit=False) == "message"
