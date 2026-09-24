@@ -192,6 +192,95 @@ def test_un_id_explicite_prime_sur_le_titre():
     asyncio.run(run())
 
 
+#: Un vrai debut de PDF : en-tete, marqueur binaire (octets > 0x7F) et un NUL.
+#: Decode en UTF-8 puis reencode, il ne ressortirait PAS a l'identique.
+PDF_BYTES = (
+    b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<< /Type /Catalog >>\nendobj\n"
+    b"stream\n\x00\x89\xff\xfe\x80\nendstream\n%%EOF\n"
+)
+
+
+def test_publication_d_un_pdf_binaire_par_chemin():
+    """Chemin nominal : vault_write des octets bruts, puis publish par path."""
+
+    async def run():
+        adapter, posted = _make_adapter()
+        assert await adapter.vault_write(
+            "demo", "livrables/devis-v4.pdf", PDF_BYTES, "application/pdf"
+        )
+        got = await adapter.publish_artifact(
+            "demo", "file", path="livrables/devis-v4.pdf", title="Devis V4"
+        )
+        assert got is not None
+        # Les octets partent INTACTS : aucun passage par un str.
+        assert adapter.written == [
+            {
+                "method": "PUT",
+                "url": "http://pulse-chat.test/api/agent/vault/demo/livrables/devis-v4.pdf",
+                "body": PDF_BYTES,
+            }
+        ]
+        # La publication ne relit ni ne reecrit le fichier : un pointeur.
+        assert len(posted) == 1
+        assert posted[0]["artifactKind"] == "file"
+        assert posted[0]["path"] == "livrables/devis-v4.pdf"
+        assert posted[0]["artifactId"] == got
+        assert "content" not in posted[0]
+
+    asyncio.run(run())
+
+
+def test_un_pdf_ne_passe_jamais_par_content():
+    async def run():
+        adapter, posted = _make_adapter()
+        with pytest.raises(ValueError, match="path"):
+            await adapter.publish_artifact(
+                "demo", "file", content=PDF_BYTES.decode("latin-1"), title="Devis"
+            )
+        # Refus AVANT toute I/O : rien d'ecrit, rien de publie.
+        assert adapter.written == [] and posted == []
+
+    asyncio.run(run())
+
+
+def test_republier_le_meme_artifact_id_pointe_la_meme_carte():
+    """V3 puis V4 du meme devis : meme id, meme chemin -> une version de plus.
+
+    Le plugin n'historise rien lui-meme : il reecrit le fichier et republie le
+    MEME ``artifactId``. C'est l'app qui archive l'etat precedent et incremente
+    la version de la carte existante.
+    """
+
+    async def run():
+        adapter, posted = _make_adapter()
+        v3 = PDF_BYTES.replace(b"1.7", b"1.3")
+        path = "livrables/devis.pdf"
+        ids = []
+        for body in (v3, PDF_BYTES):
+            assert await adapter.vault_write("demo", path, body, "application/pdf")
+            ids.append(
+                await adapter.publish_artifact(
+                    "demo", "file", path=path, artifact_id="devis-client", title="Devis"
+                )
+            )
+        assert ids == ["devis-client", "devis-client"]
+        assert [p["artifactId"] for p in posted] == ["devis-client", "devis-client"]
+        assert [p["path"] for p in posted] == [path, path]
+        assert [w["body"] for w in adapter.written] == [v3, PDF_BYTES]
+
+    asyncio.run(run())
+
+
+def test_sans_id_un_meme_titre_de_fichier_versionne_la_meme_carte():
+    async def run():
+        adapter, posted = _make_adapter()
+        a = await adapter.publish_artifact("demo", "file", path="a.pdf", title="Devis V4")
+        b = await adapter.publish_artifact("demo", "file", path="a.pdf", title="devis  v4")
+        assert a == b and a.startswith("art-file-")
+
+    asyncio.run(run())
+
+
 def test_vault_list_parse_la_reponse():
     async def run():
         adapter, _ = _make_adapter()

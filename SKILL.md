@@ -37,7 +37,7 @@ tente pas d'actions vouées au refus, et sait nommer à l'humain ce qui lui manq
 | Ton plan de travail (tâches) | **outils MCP** `plan_*` |
 | Livrer la réponse d'une routine | **outil MCP** `routine_deliver` |
 | Coffre-fort d'un canal (lire/écrire un fichier) | **le plugin**, routes HTTP `…/api/agent/vault/…` — **aucun outil MCP** |
-| Publier un artifact (diagramme, document) | **le plugin**, `POST /api/agent/messages` |
+| Publier un artifact (diagramme, document, **fichier** PDF/tableur/image) | **le plugin**, `POST /api/agent/messages` — un fichier binaire est `artifactKind: "file"` + `path` (déjà écrit au coffre), jamais un `content` ; republier le même `artifactId` crée une nouvelle version |
 | Faire valider ton plan ou ton livrable avant d'agir | **outil du plugin** `pulse_request_approval` (skill `pulse-chat:approvals`) |
 | Accord sur une commande jugée dangereuse | **Hermes**, son garde-fou — tu n'as rien à appeler |
 | Accord pour un envoi extérieur par connecteur | **le propriétaire du compte**, par sa délégation — refus `connector_approval_required`, que `pulse_request_approval` ne lève PAS |
