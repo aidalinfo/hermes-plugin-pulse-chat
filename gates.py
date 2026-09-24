@@ -229,7 +229,7 @@ GATE_TOOL_SCHEMA: Dict[str, Any] = {
                     "(le livrable lui-meme, un rapport d'incident, un devis). Des "
                     "REFERENCES, jamais le contenu : `vault:<chemin>` pour un "
                     "fichier du coffre de la conversation (ecris-le d'abord avec "
-                    "tes outils de coffre), `message:<id>` pour une piece jointe "
+                    "pulse_vault_write), `message:<id>` pour une piece jointe "
                     "deja envoyee dans la conversation. Le PREFIXE est "
                     "obligatoire. Une reference introuvable fait refuser toute la "
                     "demande (`gate_attachment_not_found`) : corrige-la et "

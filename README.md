@@ -23,8 +23,9 @@ Ce plugin est publié sur **github.com/aidalinfo/hermes-plugin-pulse-chat**
 Voir aussi [`SKILL.md`](./SKILL.md) : ce que **l'agent** doit savoir pour se
 servir de Pulse Chat une fois branché : les outils MCP de `/mcp-hermes`
 (`connectors_available` et les capacités `connector_*`, le plan de travail
-`plan_*`, `routine_deliver`), **ce qui n'en est pas** (le coffre-fort et les
-artifacts passent par les routes du plugin, les approbations par
+`plan_*`, `routine_deliver`), **ce qui n'en est pas** (l'écriture au coffre-fort
+et la publication d'un fichier passent par les outils du plugin
+`pulse_vault_write` et `pulse_publish_artifact`, les approbations par
 `request_approval()` côté Hermes), le piège `plan_*` vs `tasks_*`, brouillon
 contre envoi réel, les pièces jointes par référence préfixée, et quoi faire
 d'un refus. Format non vérifié dans une image Hermes réelle : voir
@@ -220,6 +221,51 @@ le mode d'emploi détaillé est un skill enregistré par le plugin
 annoncé** dans `<available_skills>`, d'où le fait que les deux textes le
 nomment. Un refus de l'app (`no_approver_configured`, **422**) est lu dans le
 corps de la réponse et rendu tel quel à l'agent.
+
+### Déposer et montrer un fichier (`pulse_vault_write`, `pulse_publish_artifact`)
+
+Deux outils du plugin (≥ 1.10.0), enregistrés à côté de
+`pulse_request_approval`. **Ils manquaient** : `vault_write` et
+`publish_artifact` sont des méthodes de l'adaptateur, que le modèle ne voit
+pas, et aucun outil ne les appelait. Un agent qui avait produit un PDF n'avait
+donc aucun moyen de le poser dans la conversation — le support `kind: "file"`
+de la 1.9.1 publiait dans une méthode que rien ne déclenchait, et l'ancienne
+doc (« c'est ton adaptateur qui appelle le coffre ») envoyait l'agent chercher
+un point d'entrée inexistant.
+
+```
+pulse_vault_write(path, local_path | content)          # outil, toolset "pulse_chat"
+    -> PUT /api/agent/vault/<canal>/<path>              (fichier local EN FLUX)
+pulse_publish_artifact(kind, title, path | content, artifact_id?)
+    -> [PUT du contenu texte]  puis  POST {kind: "artifact", artifactKind, path}
+```
+
+Le geste pour un PDF : `pulse_vault_write(path="artifacts/devis.pdf",
+local_path="/tmp/devis.pdf")`, puis `pulse_publish_artifact(kind="file",
+path="artifacts/devis.pdf", title="Devis — V4", artifact_id="devis-client")`.
+
+- **`local_path`, jamais des octets en base64.** Le plugin tourne dans le
+  process de la passerelle, là où l'agent a généré son fichier : il le lit et
+  l'envoie en flux (`Content-Length` annoncé, plafond de 100 Mo vérifié AVANT
+  d'ouvrir la connexion). C'est pour cela que l'écriture vit ici et non dans le
+  MCP de l'app. ⚠️ Si le terminal de l'agent tourne dans un bac à sable séparé
+  (backend Docker, SSH…), son disque n'est pas celui de la passerelle : l'outil
+  rend `local_file_not_found` en le disant.
+- **Le canal n'est pas un paramètre**, comme pour `pulse_request_approval` :
+  il vient de `gateway.session_context`, et l'appel est planifié sur la boucle
+  du WebSocket (jeton de session = identité de l'agent auteur).
+- **Aucun succès sans 2xx de l'app.** Les méthodes `vault_write` /
+  `publish_artifact` rendent un booléen et journalisent ; les outils rendent le
+  **message** de l'app (`statusMessage`) et un conseil par statut, pour que le
+  modèle sache s'il corrige un chemin ou prévient un humain.
+- **Écrire n'affiche rien** : `pulse_vault_write` le dit dans sa réponse, et
+  `platform_hint` nomme les deux outils ensemble.
+- **Aucune liste noire de fichiers locaux** : l'agent a déjà un terminal qui
+  affiche n'importe quel fichier en une commande. La frontière réelle est la
+  configuration de ce terminal, pas une liste qui donnerait l'illusion de
+  fermer quelque chose.
+
+Aucune mise à jour de l'app n'est requise : les routes existent déjà.
 
 ### Router un envoi vers un canal Pulse Chat
 

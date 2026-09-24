@@ -80,7 +80,7 @@ soumets doit se suffire à lui-même. Préfère les **rubriques** à un long
 Règles qui évitent un refus ou une mauvaise décision :
 
 - **Pour un livrable**, le livrable lui-même va dans `attachments` (écris-le
-  d'abord dans le coffre avec tes outils de coffre) ou dans `body` s'il est
+  d'abord dans le coffre avec pulse_vault_write) ou dans `body` s'il est
   court ; `steps` décrit alors ce que tu feras une fois approuvé (« envoyer à la
   compta »), ou s'omet.
 - **Pour un plan**, `steps` est la rubrique qui compte : une étape = une action

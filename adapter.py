@@ -79,6 +79,8 @@ from .questions import (
 )
 from .artifacts import (
     build_artifact_payload,
+    is_artifact_kind,
+    normalize_title,
     default_artifact_id,
     default_artifact_path,
 )
@@ -97,7 +99,24 @@ from .connectors import (
     connector_url,
     parse_connector_error,
 )
-from .vault import vault_url
+from .vault import VaultPathError, normalize_vault_path, vault_url
+from .workspace import (
+    PUBLISH_DESCRIPTION,
+    PUBLISH_SCHEMA,
+    PUBLISH_TOOL_NAME,
+    UPLOAD_TIMEOUT_SECONDS,
+    VAULT_WRITE_DESCRIPTION,
+    VAULT_WRITE_SCHEMA,
+    VAULT_WRITE_TOOL_NAME,
+    WorkspaceToolError,
+    content_type_for,
+    exclusive_source,
+    http_refusal,
+    published_result,
+    refused_result as workspace_refused,
+    resolve_local_file,
+    written_result,
+)
 from .voice import (
     MAX_VOICE_BYTES,
     caption_header,
@@ -1395,6 +1414,153 @@ class PulseChatAdapter(BasePlatformAdapter):
             logger.warning("Pulse Chat: coffre %s en echec — %s", method, exc)
         return None
 
+    # ── Outils offerts au MODELE (coffre + publication, cf. workspace.py) ──
+    #
+    # Distincts de ``vault_write`` / ``publish_artifact`` : ceux-la rendent un
+    # booleen et journalisent l'echec, ce qui suffit a du code. Un MODELE a
+    # besoin du MOTIF du refus pour savoir s'il corrige un chemin ou previent un
+    # humain — d'ou des variantes qui rendent le statut et le message de l'app.
+
+    def _http_detailed(
+        self,
+        method: str,
+        url: str,
+        *,
+        body: Any = None,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: float = _HTTP_TIMEOUT,
+    ) -> Tuple[int, Any]:
+        """``(statut, corps JSON ou None)`` — jamais d'exception. Bloquant.
+
+        ``body`` peut etre des octets ou un fichier ouvert : urllib l'envoie
+        alors EN FLUX, sans le materialiser (``Content-Length`` fourni par
+        l'appelant). Statut ``0`` = l'app n'a pas repondu du tout.
+        """
+        request = urllib.request.Request(
+            url, data=body, headers=self._auth_headers(headers), method=method
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read()
+                status = int(response.status)
+        except urllib.error.HTTPError as exc:
+            status = int(exc.code)
+            try:
+                raw = exc.read()
+            except Exception:
+                raw = b""
+            logger.warning("Pulse Chat: %s %s -> HTTP %s", method, url, status)
+        except Exception as exc:
+            logger.warning("Pulse Chat: %s %s en echec — %s", method, url, exc)
+            return 0, {"message": str(exc)}
+        try:
+            parsed = json.loads(raw.decode("utf-8")) if raw else None
+        except (UnicodeDecodeError, ValueError):
+            parsed = None
+        return status, parsed
+
+    def _vault_put_for_tool(
+        self, chat_id: str, path: str, *, local_path: Optional[str], content: Optional[str]
+    ) -> Tuple[int, Any, int]:
+        """PUT du coffre, octets d'un fichier local (EN FLUX) ou d'un texte."""
+        url = vault_url(self.base_url, chat_id, path)
+        content_type = content_type_for(path)
+        if local_path is not None:
+            real, size = resolve_local_file(local_path)
+            with open(real, "rb") as handle:
+                status, body = self._http_detailed(
+                    "PUT",
+                    url,
+                    body=handle,
+                    headers={"Content-Type": content_type, "Content-Length": str(size)},
+                    timeout=UPLOAD_TIMEOUT_SECONDS,
+                )
+            return status, body, size
+        data = (content or "").encode("utf-8")
+        if content_type == "application/octet-stream":
+            content_type = "text/plain; charset=utf-8"
+        status, body = self._http_detailed(
+            "PUT",
+            url,
+            body=data,
+            headers={"Content-Type": content_type, "Content-Length": str(len(data))},
+            timeout=UPLOAD_TIMEOUT_SECONDS,
+        )
+        return status, body, len(data)
+
+    async def tool_vault_write(self, chat_id: str, args: Dict[str, Any]) -> str:
+        """Corps de ``pulse_vault_write`` — rend TOUJOURS une chaine JSON."""
+        try:
+            path = normalize_vault_path(args.get("path"))
+            local_path, content = exclusive_source(args, "local_path")
+            status, body, size = await asyncio.to_thread(
+                self._vault_put_for_tool, chat_id, path, local_path=local_path, content=content
+            )
+        except VaultPathError as exc:
+            return workspace_refused("invalid_request", f"Chemin de coffre refuse : {exc}")
+        except WorkspaceToolError as exc:
+            return workspace_refused(exc.code, exc.message)
+        if not 200 <= status < 300:
+            return http_refusal(status, body)
+        return written_result(path, size)
+
+    async def tool_publish_artifact(self, chat_id: str, args: Dict[str, Any]) -> str:
+        """Corps de ``pulse_publish_artifact`` — rend TOUJOURS une chaine JSON.
+
+        Aucun succes n'est annonce sans reponse 2xx de l'app : un modele qui
+        croit avoir publie le dit a l'humain, et c'est exactement la panne que
+        cet outil existe pour supprimer.
+        """
+        kind = args.get("kind")
+        if not is_artifact_kind(kind):
+            return workspace_refused("invalid_request", f"Type d'artifact inconnu : {kind!r}")
+        title = normalize_title(args.get("title"))
+        if not title:
+            return workspace_refused("invalid_request", "Le titre de la carte est requis")
+        try:
+            path, content = exclusive_source(args, "path")
+            if kind == "file" and content is not None:
+                # Meme refus que ``publish_artifact`` : `content` part en UTF-8,
+                # un binaire y arriverait corrompu sans erreur.
+                raise WorkspaceToolError(
+                    "invalid_request",
+                    "kind='file' attend `path` : ecris d'abord le fichier avec pulse_vault_write",
+                )
+            raw_id = args.get("artifact_id")
+            artifact_id = (
+                raw_id.strip()
+                if isinstance(raw_id, str) and raw_id.strip()
+                else default_artifact_id(kind, title)
+            )
+            if path is None:
+                path = default_artifact_path(kind, title, artifact_id)
+            path = normalize_vault_path(path)
+            if content is not None:
+                status, body, _size = await asyncio.to_thread(
+                    self._vault_put_for_tool, chat_id, path, local_path=None, content=content
+                )
+                if not 200 <= status < 300:
+                    return http_refusal(status, body)
+        except VaultPathError as exc:
+            return workspace_refused("invalid_request", f"Chemin de coffre refuse : {exc}")
+        except WorkspaceToolError as exc:
+            return workspace_refused(exc.code, exc.message)
+
+        payload = build_artifact_payload(
+            channel_slug=chat_id, artifact_id=artifact_id, kind=kind, path=path, title=title
+        )
+        data = json.dumps(payload).encode("utf-8")
+        status, body = await asyncio.to_thread(
+            self._http_detailed,
+            "POST",
+            f"{self.base_url}/api/agent/messages",
+            body=data,
+            headers={"Content-Type": "application/json"},
+        )
+        if not 200 <= status < 300:
+            return http_refusal(status, body)
+        return published_result(artifact_id, kind, path)
+
     # ── Connecteurs tiers (Outlook, Teams, agenda) ───────────────────────
 
     async def call_connector(
@@ -2148,6 +2314,77 @@ async def _pulse_request_approval(args: Dict[str, Any], **_kwargs: Any) -> str:
         adapter._pending_gates.pop(request_id, None)
 
 
+def _session_chat_id() -> str:
+    """Canal de la conversation en cours, lu dans le contexte de session."""
+    try:
+        from gateway.session_context import get_session_env
+
+        return str(get_session_env("HERMES_SESSION_CHAT_ID", "") or "")
+    except Exception:
+        return ""
+
+
+async def _run_workspace_tool(method_name: str, args: Dict[str, Any]) -> str:
+    """Execute un outil de coffre sur la boucle du WEBSOCKET.
+
+    Meme raison que ``pulse_request_approval`` : ``model_tools._run_async`` fait
+    tourner le handler sur une AUTRE boucle, dans un thread ; l'adaptateur (son
+    jeton de session, qui dit a l'app quel agent ecrit) vit sur la sienne.
+    """
+    chat_id = _session_chat_id()
+    if not chat_id:
+        return workspace_refused("no_channel", "Aucune conversation Pulse Chat en cours")
+    adapter = _live_adapter()
+    if adapter is None or adapter._loop is None:
+        return workspace_refused("not_connected", "Pulse Chat est injoignable")
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            getattr(adapter, method_name)(chat_id, dict(args or {})), adapter._loop
+        )
+        return await asyncio.wrap_future(future)
+    except Exception as exc:
+        # Filet : un outil qui leve ferait croire au modele a une panne d'outil
+        # sans motif. On rend un refus lisible, jamais un succes.
+        logger.warning("Pulse Chat: outil %s en echec — %s", method_name, exc)
+        return workspace_refused("not_sent", str(exc))
+
+
+async def _pulse_vault_write(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Handler de ``pulse_vault_write``."""
+    return await _run_workspace_tool("tool_vault_write", args)
+
+
+async def _pulse_publish_artifact(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Handler de ``pulse_publish_artifact``."""
+    return await _run_workspace_tool("tool_publish_artifact", args)
+
+
+def _register_workspace_tools(ctx) -> None:
+    """Outils de coffre et de publication. Chacun isole : l'echec de l'un
+    n'empeche ni l'autre ni la plateforme."""
+    for name, schema, handler, description, emoji in (
+        (VAULT_WRITE_TOOL_NAME, VAULT_WRITE_SCHEMA, _pulse_vault_write, VAULT_WRITE_DESCRIPTION, "🗄️"),
+        (PUBLISH_TOOL_NAME, PUBLISH_SCHEMA, _pulse_publish_artifact, PUBLISH_DESCRIPTION, "📎"),
+    ):
+        try:
+            registered = ctx.register_tool(
+                name=name,
+                toolset="pulse_chat",
+                schema=schema,
+                handler=handler,
+                is_async=True,
+                description=description,
+                emoji=emoji,
+            )
+            if registered is None:
+                _warn_once(
+                    f"{name}_shadowed",
+                    f"Pulse Chat: l'outil {name} n'a pas ete enregistre (nom deja pris ?)",
+                )
+        except Exception as exc:
+            _warn_once(f"{name}_failed", f"Pulse Chat: outil {name} non enregistre — {exc}")
+
+
 def _register_gate_tool(ctx) -> None:
     """Outil + skill d'approbation. Jamais bloquant pour la plateforme."""
     try:
@@ -2224,7 +2461,16 @@ def register(ctx):
             "changes_requested, apply the comment and resubmit; on denied, stop; "
             "on pending, stop and tell the human you are waiting — the decision "
             "will reach you later as a message. Details: load the skill "
-            "pulse-chat:approvals."
+            "pulse-chat:approvals.\n\n"
+            # Sans cette phrase, un agent qui a produit un PDF cherche un moyen
+            # de le « joindre » et n'en trouve aucun : les deux outils existent
+            # mais rien ne dit qu'ils vont ensemble, ni qu'ecrire n'affiche rien.
+            "Files: to share a file you produced (PDF, spreadsheet, image, "
+            "archive) in the conversation, call pulse_vault_write with its "
+            "local_path, THEN pulse_publish_artifact with kind='file' and the "
+            "same path. Writing alone shows nothing in the conversation. Never "
+            "tell the human a file is available before pulse_publish_artifact "
+            "returned published."
         ),
     )
     # ``parse_target_ref_fn`` n'existe pas sur les Hermes anterieurs a
@@ -2248,3 +2494,4 @@ def register(ctx):
         )
         ctx.register_platform(**entry)
     _register_gate_tool(ctx)
+    _register_workspace_tools(ctx)
