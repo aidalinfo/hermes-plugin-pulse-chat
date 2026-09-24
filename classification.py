@@ -10,6 +10,8 @@ L'agent Hermes livre trois natures de contenu sur le meme canal :
    Formats reels (gateway/run.py) : ``{emoji} {tool}: "{preview}"``,
    ``{emoji} {verb}{connector}{preview}`` (ex ``🔍 Searching the web for ...``),
    ``💻 terminal\n```...````, ``{emoji} {tool}({keys})\n{json}`` en verbose.
+   Et le bloc terminal NU (`````\n<commande>\n`````, sans ``💻``) — voir
+   ``_is_bare_terminal_bubble``.
 3. Interims a prefixes emoji  -> kind ``tool_event`` (phase ``interim``)
    Prefixes litteraux : ⚡ ⏳ ⏩ ↪ ♻️ ♻ 🔄 ✅ ❌ 💬 💻
 
@@ -49,6 +51,9 @@ TERMINAL_PREFIX = "💻"
 # Premier jeton (1-4 chars, sans espace) suivi d'un mot : candidat tool-progress.
 _TOOL_TOKEN_RE = re.compile(r"^(\S{1,4})\s+([A-Za-z_][\w\-]*)")
 
+# Ligne de fermeture d'un bloc terminal court, avec le suffixe de dedup d'Hermes.
+_FENCE_CLOSE_RE = re.compile(r"^```(?: \(×\d+\))?$")
+
 # Caracteres "transparents" dans un cluster emoji.
 _EMOJI_JOINERS = frozenset((0xFE0F, 0x200D))  # variation selector-16, ZWJ
 
@@ -71,6 +76,54 @@ def _looks_like_emoji(token: str) -> bool:
             return False
         seen_symbol = True
     return seen_symbol
+
+
+def _is_progress_line(line: str) -> bool:
+    """Vrai si ``line`` est une ligne de tool progress a prefixe (``💻``, interim, emoji + mot)."""
+    if line.startswith(TERMINAL_PREFIX) or line.startswith(INTERIM_PREFIXES):
+        return True
+    match = _TOOL_TOKEN_RE.match(line)
+    return bool(match and _looks_like_emoji(match.group(1)))
+
+
+def _is_bare_terminal_bubble(content: str) -> bool:
+    """Vrai si ``content`` est une bulle de progression qui s'ouvre sur un bloc terminal NU.
+
+    Hermes omet l'en-tete ``💻 terminal`` quand deux commandes terminal se
+    suivent (``header = "" if last_was_terminal_block``), et n'oublie PAS ce
+    drapeau quand une phrase de l'agent referme la bulle de progression
+    (``_reset_progress_bubble``). La bulle suivante commence donc par
+    `````\n<commande>\n````` sans aucun emoji, et passait en ``message`` : une
+    commande ``infra-ssh`` affichee en bulle au milieu du fil, puis repetee en
+    activite d'outil par l'edition qui suit.
+
+    Reconnaissance STRICTE de la forme exacte qu'Hermes produit : bloc court
+    (fence sans langage, UNE ligne de commande, fence de fermeture avec
+    ``(×N)`` eventuel), et rien d'autre que d'autres blocs ou des lignes de
+    progression a prefixe. La moindre ligne de prose ⇒ ``False`` : une reponse
+    qui commence par une commande puis l'explique reste un message.
+    """
+    lines = (content or "").rstrip().split("\n")
+    if not lines or lines[0] != "```":
+        return False
+    i, saw_block = 0, False
+    while i < len(lines):
+        line = lines[i]
+        if line == "```":
+            if i + 2 >= len(lines):
+                return False
+            command = lines[i + 1]
+            if not command.strip() or command.startswith("```"):
+                return False
+            if not _FENCE_CLOSE_RE.match(lines[i + 2]):
+                return False
+            i += 3
+            saw_block = True
+            continue
+        if not _is_progress_line(line):
+            return False
+        i += 1
+    return saw_block
 
 
 def parse_tool(content: str) -> Dict[str, Optional[str]]:
@@ -99,6 +152,10 @@ def parse_tool(content: str) -> Dict[str, Optional[str]]:
     match = _TOOL_TOKEN_RE.match(content)
     if match and _looks_like_emoji(match.group(1)):
         return {"tool": match.group(2), "phase": "progress"}
+
+    # Bloc terminal nu : suite d'une serie de commandes terminal apres une phrase.
+    if _is_bare_terminal_bubble(content):
+        return {"tool": "terminal", "phase": "progress"}
 
     return {"tool": None, "phase": None}
 
