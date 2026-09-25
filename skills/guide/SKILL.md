@@ -1,22 +1,11 @@
 ---
-name: pulse-chat
-description: Se servir de Pulse Chat depuis un agent Hermes — les outils MCP de /mcp-hermes (connectors_available et les 20 capacités connector_*, le plan de travail plan_*, routine_deliver), ce qui n'en est PAS (l'écriture au coffre-fort et la publication d'un fichier dans la conversation passent par les outils du plugin pulse_vault_write et pulse_publish_artifact, les approbations de COMMANDE par le garde-fou d'Hermes, la validation d'un plan ou d'un livrable par l'outil du plugin pulse_request_approval), le piège plan_* contre tasks_*, brouillon contre envoi réel, aperçu contre corps de courriel, les pièces jointes par référence préfixée bornées à 3 Mo, et quoi faire d'un refus. À charger dès qu'un canal Pulse Chat demande d'agir sur un compte tiers délégué (courriel, agenda, To Do, Teams, GitHub), de tenir un plan de tâches, de déposer un fichier, ou de répondre à une routine.
+name: guide
+description: Se servir de Pulse Chat depuis un agent Hermes — lire un canal (channels_list pour apprendre les slugs, channel_context pour le fil, channel_members pour qui est là, channel_artifact et le coffre), le plan de travail plan_* (dépendances comprises), écrire au coffre et publier un fichier (pulse_vault_write + pulse_publish_artifact du plugin, ou en secours channel_vault_upload_url + channel_artifact_publish du MCP), les connecteurs délégués connector_*, routine_deliver, le piège plan_* contre tasks_*, et quoi faire d'un refus (emitter_ambiguous, agent_credential_required, channel_not_served…). À charger dès qu'un canal Pulse Chat demande de retrouver ce qui s'est dit, d'agir sur un compte tiers, de tenir un plan de tâches, de déposer ou montrer un fichier, ou de répondre à une routine.
 ---
 
-> ⚠️ **Format non vérifié.** Cette skill a été écrite sans pouvoir inspecter
-> `tools.skills_tool._find_all_skills` ni `hermes_cli.skills_config` dans une
-> image Hermes réelle (accès à une machine de bot indisponible au moment de la
-> rédaction ; ni image, ni CLI `hermes`, ni `~/.hermes` sur la machine de
-> rédaction). Le frontmatter ci-dessus (`name` + `description`) reprend le
-> format des skills Claude, choisi par HYPOTHÈSE, parce que
-> `capabilities.py` du plugin lit ce que rend `_find_all_skills()` sous la
-> forme de dictionnaires `{"name": ..., "description": ...}` (voir
-> `capabilities.py` lignes ~175-188 et `tests/test_capabilities.py`) — c'est
-> une correspondance partielle, pas une confirmation de l'emplacement du
-> fichier ni du reste du frontmatter. **Avant de déployer cette skill sur un
-> bot, vérifie sur l'image réelle qu'elle se charge** (une skill mal formée
-> ne lève aucune erreur — elle disparaît en silence, exactement le mode de
-> panne que ce chantier existe pour éliminer) et corrige ce fichier au besoin.
+> Enregistré par le plugin sous le nom `pulse-chat:guide` (`register_skill`,
+> comme `pulse-chat:approvals`), et nommé dans le `platform_hint` : un skill de
+> plugin n'est jamais annoncé au modèle, il se charge sur demande explicite.
 
 # Pulse Chat
 
@@ -36,23 +25,39 @@ tente pas d'actions vouées au refus, et sait nommer à l'humain ce qui lui manq
 | Compte tiers délégué (courriel, agenda, To Do, Teams, GitHub) | **outils MCP** `connector_*` |
 | Ton plan de travail (tâches) | **outils MCP** `plan_*` |
 | Livrer la réponse d'une routine | **outil MCP** `routine_deliver` |
+| Savoir dans quels canaux tu travailles | **outil MCP** `channels_list` |
+| Retrouver ce qui s'est dit, qui est là, un document publié | **outils MCP** `channel_context`, `channel_members`, `channel_artifact` |
 | Lire le coffre-fort d'un canal | **outils MCP** `channel_vault_list`, `channel_vault_read` |
-| Écrire un fichier au coffre-fort (PDF, tableur, image, texte…) | **outil du plugin** `pulse_vault_write` (`path` + `local_path`, ou `content` pour un texte) — **aucun outil MCP** |
-| Montrer un fichier ou un document dans la conversation | **outil du plugin** `pulse_publish_artifact` — `kind: "file"` + `path` pour un fichier déjà écrit au coffre, jamais un `content` ; republier le même `artifact_id` crée une nouvelle version |
+| Écrire un fichier au coffre-fort (PDF, tableur, image, vidéo, texte…) | **outil du plugin** `pulse_vault_write` (`path` + `local_path`, ou `content` pour un texte). En secours, si cet outil n'est pas dans ta liste : **outils MCP** `channel_vault_write` (petit fichier) ou `channel_vault_upload_url` (gros fichier : tu fais le PUT toi-même) |
+| Montrer un fichier ou un document dans la conversation | **outil du plugin** `pulse_publish_artifact` — `kind: "file"` + `path` pour un fichier déjà écrit au coffre ; en secours, **outil MCP** `channel_artifact_publish`. Republier le même `artifact_id` crée une nouvelle version |
 | Faire valider ton plan ou ton livrable avant d'agir | **outil du plugin** `pulse_request_approval` (skill `pulse-chat:approvals`) |
 | Accord sur une commande jugée dangereuse | **Hermes**, son garde-fou — tu n'as rien à appeler |
 | Accord pour un envoi extérieur par connecteur | **le propriétaire du compte**, par sa délégation — refus `connector_approval_required`, que `pulse_request_approval` ne lève PAS |
 
-⚠️ **Il n'existe AUCUN outil MCP d'ÉCRITURE au coffre-fort.** Le catalogue MCP le
-LIT (`channel_vault_list`, `channel_vault_read`) mais n'y écrit pas : pour
-déposer un fichier, tu appelles l'outil du **plugin** `pulse_vault_write`, qui lit
-le fichier sur ton disque (`local_path`) et l'envoie — jamais d'octets en base64
-dans un argument. **Écrire n'affiche RIEN dans la conversation** : pour que les
-humains voient et téléchargent le fichier, appelle ENSUITE
-`pulse_publish_artifact` avec `kind: "file"` et le même `path`. N'annonce pas à
-l'humain qu'un fichier est disponible tant que cet outil n'a pas rendu
-`published`. Comme `pulse_request_approval`, aucun des deux ne prend de canal :
-c'est celui de la conversation en cours. Trois accords
+**Déposer un fichier, puis le montrer — deux gestes.** La voie normale est celle
+du **plugin** : `pulse_vault_write` lit le fichier sur ton disque (`local_path`)
+et l'envoie — jamais d'octets en base64 dans un argument. **Écrire n'affiche
+RIEN dans la conversation** : pour que les humains voient et téléchargent le
+fichier, appelle ENSUITE `pulse_publish_artifact` avec `kind: "file"` et le même
+`path`. N'annonce pas à l'humain qu'un fichier est disponible tant que cet outil
+n'a pas rendu `published`. Comme `pulse_request_approval`, aucun des deux ne
+prend de canal : c'est celui de la conversation en cours.
+
+**Si ces deux outils ne sont pas dans ta liste** (image de plugin plus
+ancienne), le serveur MCP offre la même chose : `channel_vault_upload_url`
+(`path`, `size` EXACTE en octets, `contentType`) te rend une URL signée, tu fais
+le PUT toi-même depuis ton terminal
+(`curl -X PUT -H "Content-Type: <contentType>" --data-binary @<fichier> "<url>"`),
+puis `channel_artifact_publish` (`channel`, `path`, `title`). Pour un petit texte,
+`channel_vault_write` suffit. Ces outils prennent un `channel`, eux.
+
+⛔ **N'ouvre JAMAIS ta propre connexion WebSocket à Pulse Chat, et n'appelle pas
+ses routes `/api/agent/*` depuis un script.** Avec le seul jeton de service, sur
+un canal servi par plusieurs agents, elles te répondent 409 « émetteur
+indéterminable » : l'app ne sait pas quel agent tu es. Ce n'est pas un obstacle
+à contourner — c'est le signe qu'il faut passer par un outil (plugin, ou MCP
+authentifié par ton secret `pca_…`). Un client WebSocket fait main, en plus,
+ferait croire à l'app qu'un second bot s'est connecté sous ton nom. Trois accords
 distincts coexistent, et un seul s'appelle : l'accord sur une **commande
 dangereuse** est déclenché par le garde-fou d'Hermes, sans que tu fasses rien ;
 l'accord sur un **envoi extérieur par connecteur** appartient au propriétaire du
@@ -67,7 +72,8 @@ coffre** — l'écriture d'abord, la publication ensuite.
 ## La coordonnée commune : `channel`
 
 **Tout** outil MCP prend un paramètre `channel` — le slug du canal de la
-conversation en cours — et il est obligatoire partout, sans exception. C'est lui
+conversation en cours — et il est obligatoire partout, **sauf `channels_list`**,
+qui sert justement à l'apprendre. C'est lui
 qui donne l'organisation, le tableau, l'agent qui parle et donc la délégation qui
 s'applique. Sans lui, l'appel est refusé avant toute chose. Reprends le slug du
 message auquel tu réponds ; ne l'invente pas.
@@ -93,15 +99,44 @@ Les outils MCP n'existent que si :
 - tu portes un **secret d'agent** (`AgentCredential`, jeton `pca_…`, posé en
   `PULSE_CHAT_AGENT_TOKEN`). Le jeton de service seul te met en session
   **auto-déclarée** : tu peux LISTER les outils, mais **aucun appel de
-  connecteur** ne passera — refus `agent_credential_required`, et réessayer ne
-  sert à rien. C'est un réglage de déploiement, pas une erreur de ta part : dis-le
-  à l'humain.
+  connecteur ni aucune lecture de canal** ne passera — refus
+  `agent_credential_required` (ou `agent_session_missing` si aucun profil n'est
+  annoncé), et réessayer ne sert à rien. C'est un réglage de déploiement, pas une
+  erreur de ta part : dis-le à l'humain.
 
 **Règle d'honnêteté.** Si un outil que cette skill mentionne n'apparaît pas dans
 ta liste d'outils, ne l'invente pas et ne le simule pas en texte. Dis à l'humain
 que la fonctionnalité n'est pas branchée pour toi, plutôt que de prétendre l'avoir
 utilisée. Le pire résultat possible, ici, est un rapport plausible sur une action
 qui n'a pas eu lieu.
+
+## Lire un canal : le fil, ses personnes, ses documents
+
+Avant de faire répéter l'humain, **relis**. Six outils, tous en lecture seule :
+
+- **`channels_list`** — les canaux que tu sers (slug, nom, nature). C'est le SEUL
+  outil qui ne prend pas de `channel` : c'est lui qui te l'apprend. Appelle-le
+  dès que tu ne sais pas quel slug passer ailleurs.
+- **`channel_context`** — les derniers échanges (messages, activité d'outils,
+  cartes), 50 au plus par appel, du plus ancien au plus récent. Tant que la
+  réponse porte un `nextCursor`, l'historique continue : repasse-le en `cursor`
+  pour remonter. Son absence veut dire « début du fil » — pas avant.
+- **`channel_members`** — qui est là : les personnes avec leur rôle, les agents
+  avec leur spécialité, toi compris. À consulter avant de citer quelqu'un ou de
+  passer la main à un pair. Il ne rend ni e-mail ni présence : ne les invente pas.
+- **`channel_artifact`** — le contenu d'une carte publiée, par l'`id` que
+  `channel_context` porte sur la carte. Un document binaire rend son chemin
+  (`vault_path`), jamais ses octets : passe-le à un connecteur en `vault:<chemin>`.
+  ⚠️ L'`id` d'une **pièce jointe** à un message n'est PAS celui d'une carte :
+  aucun outil ne la lit, demande son contenu à un humain.
+- **`channel_vault_list`** puis **`channel_vault_read`** — le coffre du canal,
+  espace de travail PARTAGÉ : liste d'abord, puis lis par le chemin exact rendu.
+  Un binaire rend son chemin, pas son contenu — ce n'est pas une panne.
+
+Ce qui ne se lit jamais : une conversation privée entre deux humains (`dm`),
+même si tu y as été cité — tu y réponds, tu n'en remontes pas l'historique. Les
+salles de routine n'apparaissent pas dans `channels_list` mais se lisent par
+leur slug.
 
 ## `connectors_available` d'abord
 
@@ -298,6 +333,11 @@ confié. Pour renoncer, `plan_update` avec `status: "cancelled"`.
   ⚠️ **Une tâche naît en `backlog`** : si tu ne la passes pas en `ready`, rien ne
   se passera jamais. `depends_on` la fait attendre d'autres tâches ; `off_thread`
   lui donne son propre fil, hors de la conversation en cours.
+- **Une dépendance se pose aussi APRÈS coup** : `plan_update` avec
+  `add_depends_on` (ou `remove_depends_on`) et des `task_id`. Une dépendance
+  circulaire est refusée. Tu peux armer (`status: "ready"`) et faire attendre dans
+  le même appel : la dépendance est posée d'abord, la tâche ne partira pas avant
+  sa bloquante.
 - **« Bloquée » n'est PAS un statut** : c'est un état DÉRIVÉ du graphe de
   dépendances, que `plan_list` te rend (`blocked`, `blocked_by`). Ne cherche pas à
   l'écrire. Une bloquante **annulée** libère ses dépendantes, exactement comme une
@@ -372,9 +412,15 @@ est une information sur laquelle tu dois agir.
 
 **Lis le `hint`. Il dit quoi faire.** Trois comportements seulement :
 
-1. **Corrige et rappelle** — paramètres refusés (`connector_invalid_params`, dont
-   le détail voyage avec la réponse), ou ambiguïté tranchée par l'humain
-   (`grant_id`). Corriger, jamais répéter à l'identique.
+1. **Corrige et rappelle** — paramètres refusés (`connector_invalid_params`,
+   `invalid_arguments`, dont le détail voyage avec la réponse), ambiguïté
+   tranchée par l'humain (`grant_id`), canal inconnu (`channel_not_found` :
+   rappelle `channels_list`, n'invente pas de variante), chemin ou carte
+   introuvable (`vault_file_not_found` : liste d'abord ; `artifact_not_found` :
+   reprends l'`id` de la carte), fichier déjà présent (`file_exists` :
+   `overwrite: true` ou un autre chemin), fichier trop gros pour le dépôt en
+   ligne (`file_too_large` : `channel_vault_upload_url`). Corriger, jamais
+   répéter à l'identique.
 2. **Demande à l'humain, puis attends** — délégation manquante
    (`connector_no_grant`), outil non allumé dans ce canal
    (`connector_not_activated`), accord du propriétaire requis
@@ -384,7 +430,12 @@ est une information sur laquelle tu dois agir.
    Dans tous ces cas, **réessayer ne sert à rien** : la réparation appartient à
    quelqu'un d'autre, et ton travail est de la NOMMER clairement.
 3. **Renonce et dis-le** — secret d'agent absent (`agent_credential_required`),
-   capacité inexistante (`connector_unknown_capability`), plafond horaire atteint
+   aucun profil annoncé (`agent_session_missing`), émetteur indéterminable sur
+   un canal multi-agents (`emitter_ambiguous` : l'appel est parti avec le seul
+   jeton de service — passe par un outil authentifié par ton secret, jamais par
+   un WebSocket fait main), agent non rattaché au canal (`channel_not_served` :
+   un humain doit t'y rattacher), capacité inexistante
+   (`connector_unknown_capability`), plafond horaire atteint
    (`connector_quota_exceeded` — attendre, ou proposer à l'humain de le faire
    lui-même).
 

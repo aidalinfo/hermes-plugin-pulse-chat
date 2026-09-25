@@ -217,7 +217,7 @@ class TestEnregistrement:
     def _ctx(self):
         # Les outils par NOM : le plugin en enregistre plusieurs, et ne garder
         # que le dernier ferait tester l'outil de coffre a la place de celui-ci.
-        calls = {"tools": {}, "skill": None, "platform": None}
+        calls = {"tools": {}, "skills": {}, "platform": None}
 
         class Ctx:
             def register_platform(self, **kw):
@@ -228,7 +228,7 @@ class TestEnregistrement:
                 return object()
 
             def register_skill(self, name, path, description=""):
-                calls["skill"] = (name, path)
+                calls["skills"][name] = path
                 return object()
 
         return Ctx(), calls
@@ -243,9 +243,28 @@ class TestEnregistrement:
     def test_enregistre_le_skill_et_son_fichier_existe(self):
         ctx, calls = self._ctx()
         adapter_module.register(ctx)
-        name, path = calls["skill"]
-        assert name == "approvals"
+        path = calls["skills"]["approvals"]
         assert path.exists(), "register_skill leve FileNotFoundError sur un chemin absent"
+
+    def test_enregistre_le_skill_guide_et_son_fichier_existe(self):
+        # Le guide vivait a la racine et n'etait enregistre nulle part : aucun
+        # agent ne le lisait, sans qu'aucune erreur ne le dise.
+        ctx, calls = self._ctx()
+        adapter_module.register(ctx)
+        path = calls["skills"]["guide"]
+        assert path.exists()
+        head = path.read_text(encoding="utf-8").split("---")[1]
+        assert "name: guide" in head
+
+    def test_platform_hint_nomme_le_guide_et_les_outils_de_lecture(self):
+        ctx, calls = self._ctx()
+        adapter_module.register(ctx)
+        hint = calls["platform"]["platform_hint"]
+        assert "pulse-chat:guide" in hint
+        for tool in ("channels_list", "channel_context", "channel_members", "channel_artifact_publish"):
+            assert tool in hint
+        # La fausse piste que les agents empruntaient, ecartee noir sur blanc.
+        assert "WebSocket" in hint
 
     def test_platform_hint_nomme_loutil_et_le_skill(self):
         ctx, calls = self._ctx()
