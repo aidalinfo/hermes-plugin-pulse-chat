@@ -305,7 +305,7 @@ class PulseBrowserProvider(BrowserProvider):
         # sessionId -> Futures des outils en attente de la main.
         self._waiters: Dict[str, List["concurrent.futures.Future[Dict[str, Any]]"]] = {}
         # sessionId -> dernier humain annonce a la main (pour le rendre au modele).
-        self._last_human: Dict[str, Optional[str]] = {}
+        self._last_human: "OrderedDict[str, Optional[str]]" = OrderedDict()
         # Instant (horloge monotone) jusqu'auquel l'app a dit 501.
         self._unavailable_until: float = 0.0
 
@@ -498,7 +498,12 @@ class PulseBrowserProvider(BrowserProvider):
         session_id = control["sessionId"]
         with self._lock:
             if control["controller"] == "human":
+                self._last_human.pop(session_id, None)
                 self._last_human[session_id] = control["by"]
+                # Borne : une prise de main jamais rendue (session fermee
+                # pendant qu'un humain l'avait) ne doit pas s'accumuler.
+                while len(self._last_human) > MAX_TRACKED_SESSIONS:
+                    self._last_human.popitem(last=False)
                 return False
             helped_by = self._last_human.pop(session_id, None)
             waiters = self._waiters.pop(session_id, [])
@@ -523,10 +528,17 @@ class PulseBrowserProvider(BrowserProvider):
     def _remember(self, key: str, session_id: str, channel: str) -> None:
         with self._lock:
             previous = self._sessions.pop(key, None)
-            if previous is not None:
+            # Une ouverture = un ``close_session`` a venir : on compte CHAQUE
+            # ``create_session``. Mais une cle reecrite vers une AUTRE session
+            # ne la tient plus, d'ou le decompte — et SEULEMENT dans ce cas :
+            # meme cle, meme session (Hermes a recree la session de la tache,
+            # l'app a rendu la session chaude), decompter ferait tomber le
+            # compteur a zero a la liberation de l'ouverture precedente, et
+            # effacerait la cle vivante.
+            if previous is not None and previous["sessionId"] != session_id:
                 self._forget_one(previous["sessionId"])
-            self._sessions[key] = {"sessionId": session_id, "channel": channel}
             self._open[session_id] = self._open.get(session_id, 0) + 1
+            self._sessions[key] = {"sessionId": session_id, "channel": channel}
             while len(self._sessions) > MAX_TRACKED_SESSIONS:
                 _, oldest = self._sessions.popitem(last=False)
                 self._forget_one(oldest["sessionId"])
@@ -586,19 +598,40 @@ class PulseBrowserProvider(BrowserProvider):
 
 # ── Point d'entree des trames (adaptateur) ─────────────────────────────────
 
-_active: Optional[PulseBrowserProvider] = None
+#: Fournisseurs inscrits dans ce process. Un ENSEMBLE, pas un seul : Hermes peut
+#: charger le plugin plusieurs fois (portee par profil d'une passerelle
+#: multiplexee, rechargement), et chaque instance ne connait que les sessions
+#: qu'ELLE a ouvertes. Chacune filtre la trame par ``sessionId`` ; en garder une
+#: seule rendrait sourdes toutes les autres, sans erreur.
+_providers: List[PulseBrowserProvider] = []
+_providers_lock = threading.Lock()
 
 
-def activate(provider: Optional[PulseBrowserProvider]) -> None:
-    """Designe le fournisseur qui recoit les trames ``browser.control``."""
-    global _active
-    _active = provider
+def activate(provider: PulseBrowserProvider) -> None:
+    """Inscrit un fournisseur pour recevoir les trames ``browser.control``."""
+    with _providers_lock:
+        if provider not in _providers:
+            _providers.append(provider)
+
+
+def deactivate(provider: Optional[PulseBrowserProvider] = None) -> None:
+    """Desinscrit un fournisseur (tous si ``None``) — tests, dechargement."""
+    with _providers_lock:
+        if provider is None:
+            _providers.clear()
+        elif provider in _providers:
+            _providers.remove(provider)
 
 
 def on_control(frame: Any) -> bool:
-    """Trame ``browser.control`` recue par l'adaptateur. Sans fournisseur actif
-    (Hermes sans fournisseurs de navigateur), il n'y a personne a reveiller."""
-    provider = _active
-    if provider is None:
+    """Trame ``browser.control`` recue par l'adaptateur, transmise a CHAQUE
+    fournisseur inscrit. ``True`` si l'un d'eux avait un outil en attente."""
+    if parse_control_frame(frame) is None:
+        logger.warning("Pulse Chat: trame browser.control inexploitable ignoree")
         return False
-    return provider.on_control(frame)
+    with _providers_lock:
+        providers = list(_providers)
+    woke = False
+    for provider in providers:
+        woke = provider.on_control(frame) or woke
+    return woke

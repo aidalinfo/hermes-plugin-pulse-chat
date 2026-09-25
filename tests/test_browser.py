@@ -339,6 +339,29 @@ class TestHandoff:
         assert result["status"] == "pending"
         assert posted.is_set()
 
+    def test_meme_cle_reouverte_puis_liberation_tardive(self):
+        """Hermes recree la session de la MEME tache et l'app rend la session
+        chaude : la liberation de la premiere ouverture ne doit pas effacer
+        la cle vivante."""
+        http, posted = _handoff_http()
+        provider, _, env = _provider(http=http, wait_seconds=0.05)
+        provider.create_session("t1")
+        provider.create_session("t1")
+        provider.close_session("s1")
+        env.pop("HERMES_SESSION_CHAT_ID")  # interdit le repli par canal
+        result = json.loads(provider.handoff({"reason": "x"}, task_id="t1"))
+        assert result["status"] == "pending"
+        assert posted.is_set()
+
+    def test_meme_cle_nouvelle_session_decompte_l_ancienne(self):
+        """Meme tache, session DIFFERENTE : l'ancienne n'est plus tenue par
+        cette cle, sa liberation la fait disparaitre."""
+        provider, _, _ = _provider(http=mock.Mock(side_effect=[_opened("s-a"), _opened("s-b")]))
+        provider.create_session("t1")
+        provider.create_session("t1")
+        assert "s-a" not in provider._open
+        assert provider._open["s-b"] == 1
+
     def test_cle_suffixee_de_browser_use_retrouvee_par_la_tache(self):
         """``browser_exec`` ouvre sous ``<tache>@<profil servi>``."""
         http, _ = _handoff_http()
@@ -432,8 +455,39 @@ class TestTrame:
         assert provider.on_control(frame) is False
 
     def test_point_d_entree_module_sans_fournisseur(self):
-        browser.activate(None)
+        browser.deactivate()
         assert browser.on_control({"type": "browser.control", "sessionId": "s1", "controller": "agent"}) is False
+
+    def test_la_trame_atteint_chaque_fournisseur_inscrit(self):
+        """Deux instances du plugin (portee par profil) : la trame d'une
+        session ouverte par la SECONDE doit la reveiller, pas se perdre dans
+        la premiere."""
+        browser.deactivate()
+        first, _, _ = _provider(http=mock.Mock(return_value=_opened("s-a")))
+        http, posted = _handoff_http()
+        second, _, _ = _provider(http=http)
+        first.create_session("t0")
+        second.create_session("t1")
+        browser.activate(first)
+        browser.activate(second)
+        try:
+            thread, box = _run_in_thread(second.handoff, {"reason": "x"}, task_id="t1")
+            assert posted.wait(2)
+            assert browser.on_control(
+                {"type": "browser.control", "sessionId": "s1", "controller": "agent", "by": None}
+            )
+            thread.join(2)
+            assert json.loads(box["result"])["status"] == "done"
+        finally:
+            browser.deactivate()
+
+    def test_les_prises_de_main_retenues_sont_bornees(self):
+        provider, _, _ = _provider()
+        for index in range(browser.MAX_TRACKED_SESSIONS + 10):
+            provider.on_control(
+                {"type": "browser.control", "sessionId": f"s{index}", "controller": "human", "by": "K"}
+            )
+        assert len(provider._last_human) == browser.MAX_TRACKED_SESSIONS
 
 
 # ── Cote adaptateur : transport, trame, enregistrement ─────────────────────
@@ -517,6 +571,7 @@ class _Ctx:
     def __init__(self, with_browser=True):
         self.providers = []
         self.tools = []
+        self.platforms = []
         if with_browser:
             self.register_browser_provider = self._register_provider
 
@@ -525,6 +580,7 @@ class _Ctx:
         return object()
 
     def register_platform(self, **kwargs):
+        self.platforms.append(kwargs)
         return object()
 
     def register_tool(self, **kwargs):
@@ -543,8 +599,70 @@ def test_register_enregistre_le_fournisseur_et_l_outil():
     tool = [t for t in ctx.tools if t["name"] == "pulse_browser_handoff"][0]
     assert tool["is_async"] is False
     assert tool["handler"] == ctx.providers[0].handoff
-    # La trame reveille bien CE fournisseur.
-    assert adapter_module.browser_provider._active is ctx.providers[0]
+    # La trame atteint bien CE fournisseur.
+    assert ctx.providers[0] in adapter_module.browser_provider._providers
+    adapter_module.browser_provider.deactivate()
+
+
+def _platform_hint(ctx):
+    return ctx.platforms[-1]["platform_hint"]
+
+
+def _fake_config(monkeypatch, cfg, readonly=True):
+    import types
+
+    config = types.ModuleType("hermes_cli.config")
+    calls = []
+
+    def reader():
+        calls.append("read")
+        if isinstance(cfg, Exception):
+            raise cfg
+        return cfg
+
+    if readonly:
+        config.read_raw_config_readonly = reader
+    config.read_raw_config = lambda: (_ for _ in ()).throw(AssertionError("copie profonde inutile")) if readonly else reader()
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config)
+    sys.modules["hermes_cli"].config = config
+    return calls
+
+
+def test_hint_navigateur_absent_sans_cloud_provider_pulse(monkeypatch):
+    """Tout bot existant, le jour ou il recoit cette version : aucun n'a le
+    reglage. Lui parler d'un navigateur « vu en direct » et d'un outil cache
+    par son check_fn serait lui mentir (« Unknown tool »)."""
+    _fake_config(monkeypatch, {"browser": {"cloud_provider": "browserbase"}})
+    ctx = _Ctx()
+    adapter_module.register(ctx)
+    assert "pulse_browser_handoff" not in _platform_hint(ctx)
+    adapter_module.browser_provider.deactivate()
+
+
+def test_hint_navigateur_absent_si_configuration_illisible(monkeypatch):
+    _fake_config(monkeypatch, OSError("config.yaml illisible"))
+    ctx = _Ctx()
+    adapter_module.register(ctx)
+    assert "pulse_browser_handoff" not in _platform_hint(ctx)
+    adapter_module.browser_provider.deactivate()
+
+
+def test_hint_navigateur_present_avec_cloud_provider_pulse(monkeypatch):
+    _fake_config(monkeypatch, {"browser": {"cloud_provider": "pulse"}})
+    ctx = _Ctx()
+    adapter_module.register(ctx)
+    hint = _platform_hint(ctx)
+    assert "pulse_browser_handoff" in hint
+    assert hint.endswith(adapter_module.BROWSER_HINT)
+    adapter_module.browser_provider.deactivate()
+
+
+def test_hint_navigateur_absent_sur_un_hermes_sans_fournisseurs(monkeypatch):
+    _fake_config(monkeypatch, {"browser": {"cloud_provider": "pulse"}})
+    ctx = _Ctx(with_browser=False)
+    adapter_module.register(ctx)
+    assert "pulse_browser_handoff" not in _platform_hint(ctx)
 
 
 def test_hermes_sans_fournisseurs_de_navigateur_ne_casse_rien():
@@ -556,16 +674,21 @@ def test_hermes_sans_fournisseurs_de_navigateur_ne_casse_rien():
 
 
 def test_outil_masque_sans_cloud_provider_pulse(monkeypatch):
-    import types
-
-    config = types.ModuleType("hermes_cli.config")
-    config.read_raw_config = lambda: {"browser": {"cloud_provider": "browserbase"}}
-    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
-    monkeypatch.setitem(sys.modules, "hermes_cli.config", config)
+    _fake_config(monkeypatch, {"browser": {"cloud_provider": "browserbase"}})
     assert adapter_module._handoff_tool_available() is False
-
-    config.read_raw_config = lambda: {"browser": {"cloud_provider": "pulse"}}
+    _fake_config(monkeypatch, {"browser": {"cloud_provider": "pulse"}})
+    assert adapter_module._handoff_tool_available() is True
+    _fake_config(monkeypatch, {})
+    assert adapter_module._handoff_tool_available() is False
+    # Illisible : l'outil reste propose (une prise de main impossible coute plus).
+    _fake_config(monkeypatch, OSError("illisible"))
     assert adapter_module._handoff_tool_available() is True
 
-    config.read_raw_config = lambda: {}
-    assert adapter_module._handoff_tool_available() is False
+
+def test_lecture_sans_copie_puis_repli_sur_un_hermes_ancien(monkeypatch):
+    calls = _fake_config(monkeypatch, {"browser": {"cloud_provider": "pulse"}}, readonly=True)
+    assert adapter_module._handoff_tool_available() is True
+    assert calls == ["read"]
+    calls = _fake_config(monkeypatch, {"browser": {"cloud_provider": "pulse"}}, readonly=False)
+    assert adapter_module._handoff_tool_available() is True
+    assert calls == ["read"]

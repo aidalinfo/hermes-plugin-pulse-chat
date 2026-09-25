@@ -338,7 +338,9 @@ Ce qui ne se devine pas :
   main elle-même. 270 s au plus (sous les plafonds d'Hermes) ; `pending` dit au
   modèle de ne pas insister et de prévenir l'humain **par écrit**. Sans
   navigateur Pulse ouvert pour la tâche, l'outil répond « ouvre d'abord le
-  navigateur ». Il n'apparaît que sur un bot réglé en `cloud_provider: pulse`.
+  navigateur ». Il n'apparaît que sur un bot réglé en `cloud_provider: pulse`,
+  et le paragraphe « Browser » de `platform_hint` aussi — lu UNE fois, à
+  l'enregistrement : changer le réglage demande un redémarrage de la passerelle.
 - **Nom `pulse`, jamais `browser-use`** : Browser Use saute le fournisseur qui
   porte exactement ce nom.
 

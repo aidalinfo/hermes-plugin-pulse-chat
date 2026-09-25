@@ -2515,6 +2515,27 @@ def _browser_session_env(name: str) -> str:
         return ""
 
 
+def _browser_cloud_provider_setting() -> Optional[str]:
+    """``browser.cloud_provider`` du config.yaml, ``""`` s'il n'est pas pose,
+    ``None`` si la configuration est ILLISIBLE (hors Hermes, fichier casse).
+
+    Lecture sans copie (``read_raw_config_readonly``, v2026.9.24) : appelee par
+    un ``check_fn`` a chaque construction de schema, elle ne doit pas payer une
+    copie profonde de toute la configuration. Repli sur ``read_raw_config``
+    pour un Hermes qui ne l'a pas. Le resultat n'est JAMAIS modifie.
+    """
+    try:
+        from hermes_cli import config as hermes_config
+
+        reader = getattr(hermes_config, "read_raw_config_readonly", None) or hermes_config.read_raw_config
+        browser_cfg = (reader() or {}).get("browser", {})
+    except Exception:
+        return None
+    if isinstance(browser_cfg, dict) and "cloud_provider" in browser_cfg:
+        return str(browser_cfg.get("cloud_provider") or "").strip().lower()
+    return ""
+
+
 def _handoff_tool_available() -> bool:
     """L'outil n'a de sens que si les outils de navigation passent par Pulse.
 
@@ -2523,16 +2544,40 @@ def _handoff_tool_available() -> bool:
     configuration illisible ne cache rien : mieux vaut un outil de trop qu'une
     prise de main impossible.
     """
-    try:
-        from hermes_cli.config import read_raw_config
+    setting = _browser_cloud_provider_setting()
+    return setting is None or setting == browser_provider.PROVIDER_NAME
 
-        browser_cfg = read_raw_config().get("browser", {})
-        if isinstance(browser_cfg, dict) and "cloud_provider" in browser_cfg:
-            value = str(browser_cfg.get("cloud_provider") or "").strip().lower()
-            return value == browser_provider.PROVIDER_NAME
-        return False
-    except Exception:
-        return True
+
+#: Paragraphe de ``platform_hint`` sur le navigateur. Le navigateur Pulse est VU
+#: en direct par le canal : sans cette phrase, un agent bloque sur une page de
+#: connexion tente le mot de passe, ou abandonne, au lieu de demander la main.
+BROWSER_HINT = (
+    "Browser: your browser is shown live in the conversation. When a page "
+    "needs the human (login, captcha, SMS or 2FA code), call "
+    "pulse_browser_handoff with a one-sentence reason and wait; on done, "
+    "look at the page again before continuing; on pending, stop and tell "
+    "the human in writing what you are waiting for."
+)
+
+
+def _browser_hint(ctx) -> str:
+    """Le paragraphe navigateur, SEULEMENT si le bot navigue vraiment par Pulse.
+
+    ``platform_hint`` atteint TOUT agent Pulse Chat : sans cette condition,
+    chaque bot existant — aucun n'a ``browser.cloud_provider: pulse`` le jour
+    ou il recoit cette version — s'entendrait dire que son navigateur est vu
+    en direct, et serait envoye vers un outil que son ``check_fn`` cache
+    (« Unknown tool »). Plus strict que ``_handoff_tool_available`` : une
+    configuration illisible n'ajoute RIEN — une affirmation fausse au modele
+    coute plus qu'une phrase absente (la description de l'outil suffit a
+    l'expliquer quand il est la). Evalue UNE fois, a l'enregistrement : changer
+    le reglage demande un redemarrage de la passerelle, comme pour tout plugin.
+    """
+    if getattr(ctx, "register_browser_provider", None) is None:
+        return ""
+    if _browser_cloud_provider_setting() != browser_provider.PROVIDER_NAME:
+        return ""
+    return "\n\n" + BROWSER_HINT
 
 
 def _register_browser(ctx) -> None:
@@ -2565,8 +2610,9 @@ def _register_browser(ctx) -> None:
             "browser_provider_shadowed",
             f"Pulse Chat: fournisseur de navigateur '{browser_provider.PROVIDER_NAME}' non enregistre (nom deja pris ?)",
         )
-    # Actif meme si l'enregistrement a rendu None : une trame recue ne
-    # reveillera alors personne, ce qui est exact.
+    # Inscrit meme si l'enregistrement a rendu None : il ne peut alors avoir
+    # ouvert aucune session, donc aucune trame ne le concerne — la lui
+    # transmettre est sans effet.
     browser_provider.activate(provider)
     try:
         tool = ctx.register_tool(
@@ -2656,15 +2702,8 @@ def register(ctx):
             "plan_* is YOUR task board (never connector_tasks_*). Never open your "
             "own WebSocket to Pulse Chat nor call its /api/agent routes from a "
             "script: use these tools, and on a refusal follow its `hint`. "
-            "Details: load the skill pulse-chat:guide.\n\n"
-            # Le navigateur Pulse est VU en direct par le canal : sans cette
-            # phrase, un agent bloque sur une page de connexion tente le mot de
-            # passe, ou abandonne, au lieu de demander la main.
-            "Browser: your browser is shown live in the conversation. When a page "
-            "needs the human (login, captcha, SMS or 2FA code), call "
-            "pulse_browser_handoff with a one-sentence reason and wait; on done, "
-            "look at the page again before continuing; on pending, stop and tell "
-            "the human in writing what you are waiting for."
+            "Details: load the skill pulse-chat:guide."
+            + _browser_hint(ctx)
         ),
     )
     # ``parse_target_ref_fn`` n'existe pas sur les Hermes anterieurs a
