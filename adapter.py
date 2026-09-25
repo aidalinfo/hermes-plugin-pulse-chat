@@ -92,6 +92,7 @@ from .audio_stream import (
     encode_audio_frame,
     end_frame,
 )
+from . import browser as browser_provider
 from .capabilities import collect_capabilities
 from .connectors import (
     ConnectorCapabilityError,
@@ -745,6 +746,13 @@ class PulseChatAdapter(BasePlatformAdapter):
                         await self._handle_gate_reply(data)
                     except Exception:
                         logger.exception("Pulse Chat: erreur de traitement gate.reply")
+                elif data.get("type") == "browser.control":
+                    # Synchrone et sans I/O : resout la Future d'un outil
+                    # ``pulse_browser_handoff`` qui attend dans un AUTRE fil.
+                    try:
+                        browser_provider.on_control(data)
+                    except Exception:
+                        logger.exception("Pulse Chat: erreur de traitement browser.control")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -2447,6 +2455,191 @@ def _register_guide_skill(ctx) -> None:
         _warn_once("guide_skill_failed", f"Pulse Chat: skill {GUIDE_SKILL_NAME} non enregistre — {exc}")
 
 
+def _browser_adapter() -> Optional["PulseChatAdapter"]:
+    """Adaptateur qui porte les appels du navigateur.
+
+    Connecte de preference (son jeton de session, a jour, dit a l'app QUEL
+    agent parle). A defaut, n'importe quel adaptateur vivant : une liberation
+    lancee a ``atexit`` ou pendant une reconnexion tente sa chance plutot que
+    d'abandonner la session a l'inactivite.
+    """
+    adapter = _live_adapter()
+    if adapter is not None:
+        return adapter
+    for candidate in list(_LIVE_ADAPTERS):
+        if getattr(candidate, "base_url", "") and getattr(candidate, "token", ""):
+            return candidate
+    return None
+
+
+def _browser_http(
+    method: str, path: str, payload: Optional[Dict[str, Any]], timeout: float
+) -> Tuple[int, Any]:
+    """Transport du fournisseur ``pulse`` : l'aide HTTP commune de l'adaptateur,
+    donc les MEMES en-tetes que le coffre et les approbations (Bearer +
+    ``x-hermes-session``). Sans ce dernier, l'app ne saurait pas quel agent
+    ouvre un navigateur, et refuserait (session ``verified`` exigee)."""
+    adapter = _browser_adapter()
+    if adapter is None or not adapter.base_url:
+        return 0, {"message": "Pulse Chat injoignable (aucun adaptateur actif)"}
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Content-Type": "application/json"} if body is not None else None
+    return adapter._http_detailed(
+        method, f"{adapter.base_url}{path}", body=body, headers=headers, timeout=timeout
+    )
+
+
+def _browser_configured() -> bool:
+    """URL et jeton poses — lecture de configuration seulement, aucun reseau.
+
+    Appele au moment ou Hermes construit le schema des outils, donc souvent
+    AVANT que l'adaptateur n'existe : l'environnement fait foi, l'adaptateur
+    vivant (configuration par ``extra``) n'est qu'un complement."""
+    try:
+        if _get_secret("PULSE_CHAT_URL") and _get_secret("PULSE_CHAT_TOKEN"):
+            return True
+    except Exception:
+        pass
+    return any(
+        getattr(a, "base_url", "") and getattr(a, "token", "") for a in list(_LIVE_ADAPTERS)
+    )
+
+
+def _browser_session_env(name: str) -> str:
+    """Variable de session de la passerelle (``ContextVar``), ``""`` hors Hermes."""
+    try:
+        from gateway.session_context import get_session_env
+
+        return str(get_session_env(name, "") or "")
+    except Exception:
+        return ""
+
+
+def _browser_cloud_provider_setting() -> Optional[str]:
+    """``browser.cloud_provider`` du config.yaml, ``""`` s'il n'est pas pose,
+    ``None`` si la configuration est ILLISIBLE (hors Hermes, fichier casse).
+
+    Lecture sans copie (``read_raw_config_readonly``, v2026.9.24) : appelee par
+    un ``check_fn`` a chaque construction de schema, elle ne doit pas payer une
+    copie profonde de toute la configuration. Repli sur ``read_raw_config``
+    pour un Hermes qui ne l'a pas. Le resultat n'est JAMAIS modifie.
+    """
+    try:
+        from hermes_cli import config as hermes_config
+
+        reader = getattr(hermes_config, "read_raw_config_readonly", None) or hermes_config.read_raw_config
+        browser_cfg = (reader() or {}).get("browser", {})
+    except Exception:
+        return None
+    if isinstance(browser_cfg, dict) and "cloud_provider" in browser_cfg:
+        return str(browser_cfg.get("cloud_provider") or "").strip().lower()
+    return ""
+
+
+def _handoff_tool_available() -> bool:
+    """L'outil n'a de sens que si les outils de navigation passent par Pulse.
+
+    Sans ``browser.cloud_provider: pulse``, il repondrait toujours « ouvre
+    d'abord le navigateur » a un agent qui navigue deja — localement. Une
+    configuration illisible ne cache rien : mieux vaut un outil de trop qu'une
+    prise de main impossible.
+    """
+    setting = _browser_cloud_provider_setting()
+    return setting is None or setting == browser_provider.PROVIDER_NAME
+
+
+#: Paragraphe de ``platform_hint`` sur le navigateur. Le navigateur Pulse est VU
+#: en direct par le canal : sans cette phrase, un agent bloque sur une page de
+#: connexion tente le mot de passe, ou abandonne, au lieu de demander la main.
+BROWSER_HINT = (
+    "Browser: your browser is shown live in the conversation. When a page "
+    "needs the human (login, captcha, SMS or 2FA code), call "
+    "pulse_browser_handoff with a one-sentence reason and wait; on done, "
+    "look at the page again before continuing; on pending, stop and tell "
+    "the human in writing what you are waiting for."
+)
+
+
+def _browser_hint(ctx) -> str:
+    """Le paragraphe navigateur, SEULEMENT si le bot navigue vraiment par Pulse.
+
+    ``platform_hint`` atteint TOUT agent Pulse Chat : sans cette condition,
+    chaque bot existant — aucun n'a ``browser.cloud_provider: pulse`` le jour
+    ou il recoit cette version — s'entendrait dire que son navigateur est vu
+    en direct, et serait envoye vers un outil que son ``check_fn`` cache
+    (« Unknown tool »). Plus strict que ``_handoff_tool_available`` : une
+    configuration illisible n'ajoute RIEN — une affirmation fausse au modele
+    coute plus qu'une phrase absente (la description de l'outil suffit a
+    l'expliquer quand il est la). Evalue UNE fois, a l'enregistrement : changer
+    le reglage demande un redemarrage de la passerelle, comme pour tout plugin.
+    """
+    if getattr(ctx, "register_browser_provider", None) is None:
+        return ""
+    if _browser_cloud_provider_setting() != browser_provider.PROVIDER_NAME:
+        return ""
+    return "\n\n" + BROWSER_HINT
+
+
+def _register_browser(ctx) -> None:
+    """Fournisseur ``pulse`` + outil de prise de main. Jamais bloquant.
+
+    Un Hermes anterieur aux fournisseurs de navigateur n'a pas
+    ``register_browser_provider`` : on le dit une fois et on s'arrete — l'outil
+    seul ne servirait a rien, aucun navigateur Pulse ne pouvant s'ouvrir.
+    """
+    register_provider = getattr(ctx, "register_browser_provider", None)
+    if register_provider is None:
+        _warn_once(
+            "browser_provider_missing",
+            "Pulse Chat: cet Hermes ne connait pas register_browser_provider — "
+            "le navigateur Pulse est indisponible (Hermes >= v2026.9.24 requis).",
+        )
+        return
+    provider = browser_provider.PulseBrowserProvider(
+        _browser_http,
+        configured=_browser_configured,
+        session_env=_browser_session_env,
+    )
+    try:
+        registered = register_provider(provider)
+    except Exception as exc:
+        _warn_once("browser_provider_failed", f"Pulse Chat: fournisseur de navigateur non enregistre — {exc}")
+        return
+    if registered is None:
+        _warn_once(
+            "browser_provider_shadowed",
+            f"Pulse Chat: fournisseur de navigateur '{browser_provider.PROVIDER_NAME}' non enregistre (nom deja pris ?)",
+        )
+    # Inscrit meme si l'enregistrement a rendu None : il ne peut alors avoir
+    # ouvert aucune session, donc aucune trame ne le concerne — la lui
+    # transmettre est sans effet.
+    browser_provider.activate(provider)
+    try:
+        tool = ctx.register_tool(
+            name=browser_provider.HANDOFF_TOOL_NAME,
+            toolset="pulse_chat",
+            schema=browser_provider.HANDOFF_TOOL_SCHEMA,
+            handler=provider.handoff,
+            check_fn=_handoff_tool_available,
+            # SYNCHRONE : HTTP bloquant puis attente d'une Future thread-safe,
+            # dans le fil d'outil (ContextVar propagees) — pas de boucle a
+            # emprunter, contrairement a ``pulse_request_approval``.
+            is_async=False,
+            description=browser_provider.HANDOFF_TOOL_DESCRIPTION,
+            emoji="🤝",
+        )
+        if tool is None:
+            _warn_once(
+                "handoff_tool_shadowed",
+                f"Pulse Chat: l'outil {browser_provider.HANDOFF_TOOL_NAME} n'a pas ete enregistre (nom deja pris ?)",
+            )
+    except Exception as exc:
+        _warn_once(
+            "handoff_tool_failed",
+            f"Pulse Chat: outil {browser_provider.HANDOFF_TOOL_NAME} non enregistre — {exc}",
+        )
+
+
 def register(ctx):
     """Point d'entree plugin : appele par le systeme de plugins Hermes."""
     entry = dict(
@@ -2510,6 +2703,7 @@ def register(ctx):
             "own WebSocket to Pulse Chat nor call its /api/agent routes from a "
             "script: use these tools, and on a refusal follow its `hint`. "
             "Details: load the skill pulse-chat:guide."
+            + _browser_hint(ctx)
         ),
     )
     # ``parse_target_ref_fn`` n'existe pas sur les Hermes anterieurs a
@@ -2535,3 +2729,4 @@ def register(ctx):
     _register_gate_tool(ctx)
     _register_workspace_tools(ctx)
     _register_guide_skill(ctx)
+    _register_browser(ctx)

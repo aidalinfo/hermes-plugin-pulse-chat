@@ -1,7 +1,7 @@
 name: pulse-chat
 label: Pulse Chat
 kind: platform
-version: 1.11.0
+version: 1.12.0
 description: >
   Adaptateur de plateforme Pulse Chat pour Hermes Agent.
   Relaie les messages entre l'app Pulse Chat (front de conversation client)
@@ -9,6 +9,12 @@ description: >
   (plugin -> app) avec classification message / tool_event.
   Depend de la librairie Python `websockets` (pip install websockets).
 author: Pulse
+
+# Fournisseur de navigateur enregistre par ``register(ctx)`` (Hermes >= v2026.9.24).
+# Declaratif : Hermes ne le selectionne QUE par ``browser.cloud_provider: pulse``
+# dans le config.yaml du bot — jamais par auto-detection.
+provides_browser_providers:
+  - pulse
 
 # Les entrees ``requires_env`` sont exposees dans l'UI ``hermes config``.
 requires_env:

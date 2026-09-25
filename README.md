@@ -11,6 +11,7 @@ hermes-plugin/pulse-chat/
 ├── adapter.py          # PulseChatAdapter + register()
 ├── classification.py   # classification pure message/tool_event (0 dépendance hermes)
 ├── hello.py            # frame hello multi-profils pure (0 dépendance hermes)
+├── browser.py          # fournisseur de navigateur `pulse` + pulse_browser_handoff
 └── tests/              # pytest (sans hermes installé)
 ```
 
@@ -268,6 +269,81 @@ path="artifacts/devis.pdf", title="Devis — V4", artifact_id="devis-client")`.
 
 Aucune mise à jour de l'app n'est requise : les routes existent déjà.
 
+### Navigateur des agents (fournisseur `pulse`, `pulse_browser_handoff`)
+
+À partir de la **1.12.0**, le plugin enregistre un **fournisseur de
+navigateur** Hermes nommé `pulse` (`ctx.register_browser_provider`, Hermes
+**≥ v2026.9.24**). Les outils de navigation d'Hermes — `browser_exec`
+(Browser Use) comme `browser_*` (agent-browser) — pilotent alors le Chromium
+**hébergé par l'app** : celui qui porte le profil prêté par la personne qui
+parle à l'agent, que les membres du canal voient en direct et dont un humain
+peut prendre la main. Le plugin ne décide rien : il demande une session à
+l'app et rend l'URL CDP à Hermes, qui pilote sans modification.
+
+> ⚠️ **Réglage bot OBLIGATOIRE** — sans lui, RIEN n'appelle l'app et l'agent
+> navigue en local, sans profil ni vue en direct. Hermes ne choisit **jamais**
+> un fournisseur de plugin par auto-détection :
+>
+> ```yaml
+> # ~/.hermes/config.yaml (de CHAQUE profil qui doit naviguer par Pulse)
+> browser:
+>   cloud_provider: pulse
+> ```
+>
+> Prérequis : app Pulse Chat **≥ 0.37.0** (routes `/api/agent/browser/*`,
+> relais `/ws/browser-cdp`, trame `browser.control`) avec le navigateur
+> configuré (`BROWSER_RUNNER_URL`…), et un **secret d'agent**
+> (`PULSE_CHAT_AGENT_TOKEN`) : l'app exige une session `verified` et refuse
+> une identité auto-déclarée (`agent_credential_required`).
+
+```
+create_session(task_id)        # fil d'outil : canal lu dans HERMES_SESSION_CHAT_ID
+    -> POST /api/agent/browser/sessions {channel}
+    <- {sessionId, cdpUrl, profile}  ->  {session_name, bb_session_id: sessionId, cdp_url, features}
+close_session(sessionId)       # fin de tour / concierge, SANS contexte de session
+    -> DELETE /api/agent/browser/sessions/:id      (LIBÈRE : le Chromium reste ouvert)
+pulse_browser_handoff(reason)  # outil, toolset "pulse_chat"
+    -> POST /api/agent/browser/sessions/:id/handoff {reason}
+    <- trame WS browser.control {controller: "agent"}  ->  {status: "done"}
+    <- rien en 270 s                                   ->  {status: "pending"}
+```
+
+Ce qui ne se devine pas :
+
+- **Un refus de l'app ne se voit pas.** Si `create_session` lève, Hermes
+  retombe **sans bruit** sur son Chromium local (`browser_tool_session.py`).
+  Le `RuntimeError` porte le code de l'app (`browser_unavailable`,
+  `browser_capacity`, `agent_credential_required`…) : devant « l'agent a
+  navigué sans mon profil », lire les **journaux du bot** (« Cloud provider
+  PulseBrowserProvider failed … »). Une URL privée ou de réseau local est
+  aussi routée d'office en local par Hermes (`auto_local_for_private_urls`),
+  sans passer par nous.
+- **Après un 501 (`browser_unavailable`), plus aucun appel pendant 5 min** :
+  `create_session` lève immédiatement, Hermes navigue en local comme avant.
+  `is_available()` reste pourtant **vrai**, et c'est délibéré : en mode cloud,
+  c'est le `check_fn` des outils `browser_*` — faux, Hermes les **retire** du
+  schéma au lieu de naviguer en local, et l'agent perd la navigation entière.
+  `is_available()` ne lit que la configuration (URL + jeton), jamais le réseau.
+- **`close_session` libère, il ne ferme pas.** Hermes l'appelle à chaque fin
+  de tour ; fermer ferait perdre les onglets d'un message à l'autre et couper
+  la personne en train de se connecter. Le tour suivant reprend la session
+  chaude si le demandeur est le même (l'app décide). 404 = déjà fermée = succès ;
+  aucune exception ne remonte au concierge.
+- **Le canal n'est pas un paramètre**, et une conversation d'une AUTRE
+  plateforme (bot Telegram + Pulse) ne poste rien : `create_session` lève et
+  Hermes navigue en local.
+- **L'outil est synchrone** : HTTP bloquant puis attente d'un
+  `concurrent.futures.Future` que la boucle du WebSocket résout à la trame
+  `browser.control` — seul le retour à l'agent réveille, jamais la prise de
+  main elle-même. 270 s au plus (sous les plafonds d'Hermes) ; `pending` dit au
+  modèle de ne pas insister et de prévenir l'humain **par écrit**. Sans
+  navigateur Pulse ouvert pour la tâche, l'outil répond « ouvre d'abord le
+  navigateur ». Il n'apparaît que sur un bot réglé en `cloud_provider: pulse`,
+  et le paragraphe « Browser » de `platform_hint` aussi — lu UNE fois, à
+  l'enregistrement : changer le réglage demande un redémarrage de la passerelle.
+- **Nom `pulse`, jamais `browser-use`** : Browser Use saute le fournisseur qui
+  porte exactement ce nom.
+
 ### Router un envoi vers un canal Pulse Chat
 
 Le plugin déclare son propre parseur de cible
@@ -342,6 +418,9 @@ gateway:
 plugins:
   enabled:
     - pulse-chat
+
+browser:
+  cloud_provider: pulse     # OBLIGATOIRE pour le navigateur des agents (≥ 1.12.0)
 ```
 
 Pour que l'agent **parle** (notes vocales), ajouter au même fichier :
