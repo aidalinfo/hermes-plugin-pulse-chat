@@ -128,6 +128,22 @@ class TestFileKind:
         }
 
 
+class TestMotionKind:
+    def test_le_type_motion_est_annonce(self):
+        # Le miroir de shared/artifacts.ts : sans cette valeur ici, un agent
+        # qui publie un film se fait refuser par SON PROPRE plugin (ValueError).
+        assert "motion" in artifacts.ARTIFACT_KINDS
+
+    def test_payload_d_un_film_par_chemin(self):
+        payload = artifacts.build_artifact_payload(
+            channel_slug="c",
+            artifact_id="id",
+            kind="motion",
+            path="films/demo.html",
+        )
+        assert payload["artifactKind"] == "motion"
+
+
 class TestDefaultArtifactId:
     def test_stable_pour_un_meme_titre(self):
         a = artifacts.default_artifact_id("mermaid", "Architecture reseau")
