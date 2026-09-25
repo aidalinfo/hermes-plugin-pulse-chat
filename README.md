@@ -315,6 +315,9 @@ pulse_browser_handoff(reason)  # outil, toolset "pulse_chat"
     -> POST /api/agent/browser/sessions/:id/handoff {reason}
     <- trame WS browser.control {controller: "agent"}  ->  {status: "done"}
     <- rien en 270 s                                   ->  {status: "pending"}
+browser.control {controller: "agent", event, turnEnded, channelSlug}   # ≥ 1.14.0
+    sans outil en attente, tour fini OU handoff en pending
+        ->  message entrant « [Navigateur] … t'a rendu la main … »
 ```
 
 Ce qui ne se devine pas :
@@ -350,6 +353,24 @@ Ce qui ne se devine pas :
   navigateur ». Il n'apparaît que sur un bot réglé en `cloud_provider: pulse`,
   et le paragraphe « Browser » de `platform_hint` aussi — lu UNE fois, à
   l'enregistrement : changer le réglage demande un redémarrage de la passerelle.
+- **Rendre la main RELANCE l'agent (≥ 1.14.0).** Passé les 270 s, l'outil a
+  rendu `pending` et l'agent s'est arrêté ; un humain qui rend la main plus
+  tard — ou qui l'avait prise alors que l'agent n'attendait rien et que son
+  tour est fini — ne réveillait personne, et l'agent ne reprenait jamais. La
+  trame porte désormais `event` (`released` · `auto_released` · `closed`),
+  `turnEnded` et `channelSlug`/`channelName` : si aucun outil n'attend, que
+  l'`event` est un rendu, et que le tour est fini **ou** qu'un handoff de
+  cette session avait rendu `pending`, le plugin injecte un **message
+  entrant** `[Navigateur] …` dans le canal (même chemin que la décision
+  tardive d'une approbation). Un tour qui tourne encore n'est pas
+  interrompu ; `closed` et une trame sans `event` (app antérieure) n'injectent
+  rien — le comportement d'avant. **Déployer l'app ≥ 0.39.0 AVANT** : c'est
+  elle qui envoie ces champs, et sans eux la consigne de `pending` (« un
+  message te relancera aussi ») ne serait tenue que par l'humain. Le tour
+  injecté emporte le dernier `agentConfig` reçu dans le canal (ton,
+  consignes, `disabledTools`), et une nouvelle ouverture de session oublie le
+  `pending` du tour précédent (sinon un rendu en plein tour suivant
+  l'interromprait).
 - **Nom `pulse`, jamais `browser-use`** : Browser Use saute le fournisseur qui
   porte exactement ce nom.
 
