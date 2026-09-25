@@ -766,10 +766,11 @@ class PulseChatAdapter(BasePlatformAdapter):
                     except Exception:
                         logger.exception("Pulse Chat: erreur de traitement gate.reply")
                 elif data.get("type") == "browser.control":
-                    # Synchrone et sans I/O : resout la Future d'un outil
-                    # ``pulse_browser_handoff`` qui attend dans un AUTRE fil.
+                    # Resout la Future d'un outil ``pulse_browser_handoff`` qui
+                    # attend dans un AUTRE fil — ou, si plus personne n'attend,
+                    # relance l'agent par un message entrant.
                     try:
-                        browser_provider.on_control(data)
+                        await self._handle_browser_control(data)
                     except Exception:
                         logger.exception("Pulse Chat: erreur de traitement browser.control")
         except asyncio.CancelledError:
@@ -2167,6 +2168,52 @@ class PulseChatAdapter(BasePlatformAdapter):
         )
         await self.handle_message(event)
 
+    async def _handle_browser_control(self, data: Dict[str, Any]) -> None:
+        """Trame ``browser.control`` : reveille l'outil qui attend, ou RELANCE l'agent.
+
+        Meme raison que ``_handle_gate_reply`` : un humain qui rend la main
+        apres les 270 s de ``pulse_browser_handoff`` (l'outil a rendu
+        ``pending``), ou alors que le tour de l'agent est deja fini, ne
+        reveille personne — sans message entrant, l'agent ne reprend jamais sa
+        tache. La decision vit dans ``browser.handle_control`` (pure, testee
+        seule) ; ici, on ne fait que l'injecter.
+        """
+        notice = browser_provider.handle_control(data)
+        if notice is None:
+            return
+        slug = notice["channelSlug"]
+        source = self._last_source.get(slug) or self.build_source(
+            chat_id=slug,
+            chat_name=notice["channelName"] or slug,
+            chat_type="group",
+            user_id=None,
+            user_name=notice["by"],
+        )
+        # Unique par rendu : chaque rendu est un fait nouveau (pas de rejeu au
+        # hello pour cette trame), et deux rendus successifs doivent tous deux
+        # relancer l'agent.
+        message_id = f"browser:{notice['sessionId']}:{uuid.uuid4().hex[:12]}"
+        event = build_message_event(
+            MessageEvent,
+            {
+                "text": notice["text"],
+                "message_type": MessageType.TEXT,
+                "source": source,
+                "message_id": message_id,
+                "media_urls": [],
+                "media_types": [],
+            },
+            None,
+        )
+        self._remember_message_id(message_id)
+        logger.info(
+            "Pulse Chat: main rendue (%s) sur le navigateur %s sans attente active — agent relance dans %s",
+            notice["event"],
+            notice["sessionId"],
+            slug,
+        )
+        await self.handle_message(event)
+
     async def _post_agent_message(
         self, payload: Dict[str, Any], hermes_id: str
     ) -> SendResult:
@@ -2739,7 +2786,8 @@ BROWSER_HINT = (
     "needs the human (login, captcha, SMS or 2FA code), call "
     "pulse_browser_handoff with a one-sentence reason and wait; on done, "
     "look at the page again before continuing; on pending, stop and tell "
-    "the human in writing what you are waiting for."
+    "the human in writing what you are waiting for — a [Navigateur] message "
+    "will wake you up when the hand is given back, so do not ask to be told."
 )
 
 

@@ -490,6 +490,249 @@ class TestTrame:
         assert len(provider._last_human) == browser.MAX_TRACKED_SESSIONS
 
 
+# ── Rendu de main : relancer l'agent qui n'attend plus ───────────────────
+
+
+def _rendu(event="released", turn_ended=False, slug="compta", name="Compta", by="Killian", session="s1"):
+    frame = {"type": "browser.control", "sessionId": session, "controller": "agent", "by": by}
+    if event is not None:
+        frame.update(event=event, turnEnded=turn_ended, channelSlug=slug, channelName=name)
+    return frame
+
+
+class TestTrameDeRendu:
+    def test_les_nouveaux_champs_sont_gardes(self):
+        control = browser.parse_control_frame(_rendu("auto_released", True, "compta", "Compta", None))
+        assert control == {
+            "sessionId": "s1",
+            "controller": "agent",
+            "by": None,
+            "event": "auto_released",
+            "turnEnded": True,
+            "channelSlug": "compta",
+            "channelName": "Compta",
+        }
+
+    def test_une_app_ancienne_ne_les_envoie_pas(self):
+        control = browser.parse_control_frame(_rendu(event=None))
+        assert control["event"] is None
+        assert control["turnEnded"] is False
+        assert control["channelSlug"] is None
+        assert control["channelName"] is None
+
+    @pytest.mark.parametrize(
+        "field, value, expected",
+        [
+            ("event", "robot", None),
+            ("event", "RELEASED", None),
+            ("event", 1, None),
+            ("turnEnded", "true", False),
+            ("turnEnded", 1, False),
+            ("turnEnded", None, False),
+            ("channelSlug", "", None),
+            ("channelSlug", "   ", None),
+            ("channelSlug", 42, None),
+            ("channelName", "", None),
+            ("channelName", ["Compta"], None),
+        ],
+    )
+    def test_une_valeur_invalide_est_ignoree_jamais_devinee(self, field, value, expected):
+        frame = _rendu("released", True)
+        frame[field] = value
+        control = browser.parse_control_frame(frame)
+        assert control is not None, "un champ optionnel invalide ne rejette pas la trame"
+        assert control[field] == expected
+
+
+class TestDecisionDeRelance:
+    def _control(self, **overrides):
+        control = browser.parse_control_frame(_rendu("released", True))
+        control.update(overrides)
+        return control
+
+    def test_une_prise_de_main_ne_relance_pas(self):
+        assert not browser.handback_notice_needed(self._control(controller="human"), False, True)
+
+    def test_un_outil_reveille_suffit(self):
+        assert not browser.handback_notice_needed(self._control(), True, True)
+
+    def test_app_ancienne_sans_event(self):
+        assert not browser.handback_notice_needed(self._control(event=None), False, True)
+
+    def test_session_fermee(self):
+        assert not browser.handback_notice_needed(self._control(event="closed"), False, True)
+
+    def test_tour_fini(self):
+        assert browser.handback_notice_needed(self._control(turnEnded=True), False, False)
+
+    def test_tour_en_cours_sans_attente_n_est_pas_interrompu(self):
+        assert not browser.handback_notice_needed(self._control(turnEnded=False), False, False)
+
+    def test_tour_en_cours_mais_handoff_en_pending(self):
+        """La fenetre entre le ``pending`` et la fin du tour : l'agent s'est
+        arrete, mais Hermes n'a pas encore libere la session."""
+        assert browser.handback_notice_needed(self._control(turnEnded=False), False, True)
+
+    def test_rendu_d_office_tour_fini(self):
+        assert browser.handback_notice_needed(self._control(event="auto_released"), False, False)
+
+    def test_sans_canal(self):
+        assert not browser.handback_notice_needed(self._control(channelSlug=None), False, True)
+
+
+class TestTexteDeRelance:
+    def test_rendu_par_un_humain(self):
+        text = browser.handback_message_text("released", "Killian")
+        assert text.startswith("[Navigateur] Killian t'a rendu la main sur ton navigateur.")
+        assert "capture ou instantane" in text
+
+    def test_rendu_par_quelqu_un_d_inconnu(self):
+        assert browser.handback_message_text("released", None).startswith(
+            "[Navigateur] Un humain t'a rendu la main"
+        )
+
+    def test_rendu_d_office(self):
+        text = browser.handback_message_text("auto_released", None)
+        assert text.startswith("[Navigateur] La main t'a ete rendue d'office (5 min sans action humaine")
+        assert "sans redemander la main en boucle" in text
+
+
+@pytest.fixture
+def _inscrit():
+    """Inscrit des fournisseurs au point d'entree du module, desinscrits apres."""
+    browser.deactivate()
+
+    def inscrire(provider):
+        browser.activate(provider)
+        return provider
+
+    yield inscrire
+    browser.deactivate()
+
+
+class TestHandleControl:
+    def _pending(self, provider, task_id="t1"):
+        provider.create_session(task_id)
+        result = json.loads(provider.handoff({"reason": "Connecte-toi"}, task_id=task_id))
+        assert result["status"] == "pending"
+
+    def test_la_consigne_pending_annonce_la_relance(self):
+        advice = json.loads(browser.pending_result())["next"]
+        assert "ARRETE-TOI" in advice
+        assert "tu seras prevenu" in advice.lower()
+        # L'ancienne consigne faisait demander a l'humain de « prevenir ».
+        assert "qu'il te previenne" not in advice
+
+    def test_tour_fini_rend_un_avis(self, _inscrit):
+        _inscrit(_provider()[0])
+        notice = browser.handle_control(_rendu("released", True, by="Killian"))
+        assert notice["channelSlug"] == "compta"
+        assert notice["channelName"] == "Compta"
+        assert notice["by"] == "Killian"
+        assert notice["sessionId"] == "s1"
+        assert notice["text"].startswith("[Navigateur] Killian t'a rendu la main")
+
+    def test_sans_fournisseur_un_tour_fini_rend_quand_meme_un_avis(self, _inscrit):
+        """Bot redemarre : plus rien ne connait la session, l'agent doit
+        pourtant reprendre."""
+        assert browser.handle_control(_rendu("released", True)) is not None
+
+    def test_nomme_l_humain_qui_avait_pris_la_main(self, _inscrit):
+        _inscrit(_provider()[0])
+        browser.handle_control({"type": "browser.control", "sessionId": "s1", "controller": "human", "by": "Anais"})
+        notice = browser.handle_control(_rendu("released", True, by="Killian"))
+        assert notice["by"] == "Anais"
+        assert "Anais t'a rendu la main" in notice["text"]
+
+    def test_une_prise_de_main_ne_rend_rien(self, _inscrit):
+        _inscrit(_provider()[0])
+        frame = {"type": "browser.control", "sessionId": "s1", "controller": "human", "by": "Anais"}
+        assert browser.handle_control(frame) is None
+
+    def test_un_outil_en_attente_est_reveille_sans_avis(self, _inscrit):
+        http, posted = _handoff_http()
+        provider = _inscrit(_provider(http=http)[0])
+        provider.create_session("t1")
+        thread, box = _run_in_thread(provider.handoff, {"reason": "x"}, task_id="t1")
+        assert posted.wait(2)
+        assert browser.handle_control(_rendu("released", True)) is None
+        thread.join(2)
+        assert json.loads(box["result"])["status"] == "done"
+
+    def test_pending_memorise_puis_consomme(self, _inscrit):
+        http, _ = _handoff_http()
+        provider = _inscrit(_provider(http=http, wait_seconds=0.05)[0])
+        self._pending(provider)
+        assert "s1" in provider._handoff_pending
+        # Le tour tourne encore (turnEnded faux) : le pending suffit a relancer.
+        assert browser.handle_control(_rendu("released", False)) is not None
+        assert "s1" not in provider._handoff_pending
+        # Consomme : un second rendu, tour en cours, ne relance plus.
+        assert browser.handle_control(_rendu("released", False)) is None
+
+    def test_un_nouveau_handoff_oublie_le_pending(self, _inscrit):
+        http, posted = _handoff_http()
+        provider = _inscrit(_provider(http=http, wait_seconds=0.05)[0])
+        self._pending(provider)
+        provider._wait_seconds = 2.0
+        posted.clear()
+        thread, box = _run_in_thread(provider.handoff, {"reason": "encore"}, task_id="t1")
+        # L'attente est armee AVANT le POST : une fois poste, le pending est oublie.
+        assert posted.wait(2)
+        assert "s1" not in provider._handoff_pending
+        # L'outil attend : le rendu le reveille, et aucun avis ne part.
+        assert browser.handle_control(_rendu("released", False)) is None
+        thread.join(3)
+        assert json.loads(box["result"])["status"] == "done"
+
+    def test_pending_ne_laisse_aucune_attente_armee(self, _inscrit):
+        """Apres un ``pending``, un rendu ne doit pas « reveiller » une attente
+        morte — et croire l'agent prevenu."""
+        http, _ = _handoff_http()
+        provider = _inscrit(_provider(http=http, wait_seconds=0.05)[0])
+        self._pending(provider)
+        assert "s1" not in provider._waiters
+
+    def test_session_fermee_aucun_avis_et_pending_oublie(self, _inscrit):
+        http, _ = _handoff_http()
+        provider = _inscrit(_provider(http=http, wait_seconds=0.05)[0])
+        self._pending(provider)
+        assert browser.handle_control(_rendu("closed", True)) is None
+        assert "s1" not in provider._handoff_pending
+
+    def test_app_ancienne_aucun_avis(self, _inscrit):
+        http, _ = _handoff_http()
+        provider = _inscrit(_provider(http=http, wait_seconds=0.05)[0])
+        self._pending(provider)
+        assert browser.handle_control(_rendu(event=None)) is None
+
+    def test_sans_canal_aucun_avis_et_un_avertissement(self, _inscrit, caplog):
+        _inscrit(_provider()[0])
+        with caplog.at_level("WARNING"):
+            assert browser.handle_control(_rendu("released", True, slug=None)) is None
+        assert any("sans canal" in r.getMessage() for r in caplog.records)
+
+    def test_trame_inexploitable(self, _inscrit):
+        assert browser.handle_control({"type": "browser.control", "controller": "agent"}) is None
+
+    def test_deux_fournisseurs_un_seul_avis(self, _inscrit):
+        """Deux instances du plugin : un rendu = UN avis, et le pending de
+        l'une compte meme si l'autre ne connait pas la session."""
+        http, _ = _handoff_http()
+        _inscrit(_provider(http=mock.Mock(return_value=_opened("s-a")))[0])
+        second = _inscrit(_provider(http=http, wait_seconds=0.05)[0])
+        self._pending(second)
+        notice = browser.handle_control(_rendu("released", False))
+        assert isinstance(notice, dict) and notice["channelSlug"] == "compta"
+
+    def test_les_pending_retenus_sont_bornes(self):
+        provider, _, _ = _provider()
+        for index in range(browser.MAX_TRACKED_SESSIONS + 10):
+            provider._mark_handoff_pending(f"s{index}")
+        assert len(provider._handoff_pending) == browser.MAX_TRACKED_SESSIONS
+        assert "s0" not in provider._handoff_pending
+
+
 # ── Cote adaptateur : transport, trame, enregistrement ─────────────────────
 
 
@@ -548,7 +791,7 @@ def test_le_transport_porte_bearer_et_session(monkeypatch):
 
 def test_la_trame_browser_control_est_relayee_par_la_boucle_de_reception(monkeypatch):
     seen = []
-    monkeypatch.setattr(adapter_module.browser_provider, "on_control", lambda frame: seen.append(frame))
+    monkeypatch.setattr(adapter_module.browser_provider, "handle_control", lambda frame: seen.append(frame))
     frame = {"type": "browser.control", "sessionId": "s1", "controller": "agent", "by": None}
 
     class _Ws:

@@ -12,7 +12,8 @@ d'Hermes : il rend une URL CDP, Hermes pilote.
 Le plugin reste MINCE : il ne choisit ni le profil, ni le pret, ni qui peut
 prendre la main — l'app decide de tout (spec § 5). Il traduit
 ``create_session`` / ``close_session`` en appels HTTP, et relaie la trame
-``browser.control`` a l'outil qui l'attend.
+``browser.control`` a l'outil qui l'attend — ou, si plus personne n'attend,
+la remet a l'agent en MESSAGE entrant (``handle_control``).
 
 Contrat app (spec § 5.2, § 5.3, § 5.7) :
 
@@ -24,7 +25,22 @@ Contrat app (spec § 5.2, § 5.3, § 5.7) :
     POST   /api/agent/browser/sessions/:id/handoff  {reason}
 
     app -> plugin   trame WS
-        {type: "browser.control", sessionId, controller: "agent"|"human", by}
+        {type: "browser.control", sessionId, controller: "agent"|"human", by,
+         event?, turnEnded?, channelSlug?, channelName?}
+
+    Les quatre derniers champs ne viennent qu'avec ``controller: "agent"`` et
+    sont OPTIONNELS (une app anterieure ne les envoie pas) :
+
+      - ``event`` : ``released`` (un humain a clique « Rendre la main », ``by``
+        = son nom), ``auto_released`` (rendue d'office apres 5 min sans entree
+        humaine, ``by`` nul) ou ``closed`` (session fermee : RIEN a injecter) ;
+      - ``turnEnded`` : vrai si le tour d'Hermes est deja fini (la session a
+        ete liberee par ``close_session``) ;
+      - ``channelSlug`` / ``channelName`` : le canal ou reprendre.
+
+    Un rendu que plus aucun outil n'attend (fenetre de 270 s depassee, ou tour
+    deja fini) devient un message entrant ``[Navigateur] ...`` : sans lui,
+    personne ne relance l'agent et il ne reprend jamais sa tache.
 
 Contrat Hermes (v2026.9.24, ``agent/browser_provider.py``) — verifie dans le
 source, et chaque point a une consequence ici :
@@ -106,6 +122,9 @@ PLATFORM_NAME = "pulse_chat"
 
 CONTROLLERS = ("agent", "human")
 
+#: Valeurs connues de ``event`` sur une trame ``controller: agent``.
+HANDBACK_EVENTS = ("released", "auto_released", "closed")
+
 SESSIONS_PATH = "/api/agent/browser/sessions"
 
 #: ``(methode, chemin, charge JSON ou None, timeout) -> (statut, corps)``.
@@ -127,7 +146,8 @@ HANDOFF_TOOL_DESCRIPTION = (
     "Issue : `done` (la main t'est rendue : reprends ou tu en etais, en "
     "commencant par regarder la page — elle a change), `pending` (personne n'a "
     "rendu la main a temps : ARRETE-TOI, ne rappelle pas l'outil en boucle, "
-    "ecris a l'humain ce que tu attends de lui ; il te relancera), `refused` "
+    "ecris a l'humain ce que tu attends de lui ; un message `[Navigateur]` te "
+    "relancera automatiquement quand la main te sera rendue), `refused` "
     "(lis `code` et `message`). Tant qu'un humain a la main, tes commandes de "
     "navigation sont refusees (`pulse:human_in_control`) : c'est normal."
 )
@@ -216,8 +236,10 @@ def pending_result() -> str:
             "next": (
                 "Personne n'a rendu la main dans le delai. ARRETE-TOI : ne rappelle "
                 "pas l'outil, n'insiste pas dans le navigateur. Ecris a l'humain ce "
-                "que tu attends de lui (se connecter, saisir le code...) et qu'il "
-                "te previenne quand c'est fait ; tu reprendras a ce moment-la."
+                "que tu attends de lui (se connecter, saisir le code...). Tu seras "
+                "prevenu AUTOMATIQUEMENT, par un message, quand la main te sera "
+                "rendue : ne lui demande pas de te prevenir, et reprends a ce "
+                "moment-la."
             ),
         }
     )
@@ -255,11 +277,78 @@ def parse_control_frame(frame: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(session_id, str) or not session_id or controller not in CONTROLLERS:
         return None
     by = frame.get("by")
+    event = frame.get("event")
     return {
         "sessionId": session_id,
         "controller": controller,
         "by": by if isinstance(by, str) and by.strip() else None,
+        # Champs du rendu de main, OPTIONNELS (app anterieure) : une valeur
+        # inattendue vaut absence, jamais une valeur devinee — un ``turnEnded``
+        # lu vrai a tort interromprait un tour en cours.
+        "event": event if isinstance(event, str) and event in HANDBACK_EVENTS else None,
+        "turnEnded": frame.get("turnEnded") is True,
+        "channelSlug": _text_or_none(frame.get("channelSlug")),
+        "channelName": _text_or_none(frame.get("channelName")),
     }
+
+
+def _text_or_none(value: Any) -> Optional[str]:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _handback_wanted(control: Dict[str, Any], woke: bool, was_pending: bool) -> bool:
+    """La decision de relance, canal mis a part (``handback_notice_needed``)."""
+    if control.get("controller") != "agent" or woke:
+        # Une prise de main ne rend rien ; un outil reveille rend ``done``,
+        # l'agent reprend deja — un message de plus le ferait reprendre deux fois.
+        return False
+    if control.get("event") not in ("released", "auto_released"):
+        # App anterieure (pas d'``event``) : on ne sait pas si un tour tourne,
+        # donc on ne l'interrompt pas. ``closed`` : plus rien a reprendre.
+        return False
+    # Tour fini : personne ne relancera l'agent. Tour en cours mais handoff
+    # en ``pending`` : l'agent s'est arrete sur la consigne, et Hermes n'a
+    # simplement pas encore libere la session. Sinon un tour tourne ENCORE
+    # (l'agent n'attendait rien) : ne pas l'interrompre.
+    return bool(control.get("turnEnded")) or was_pending
+
+
+def handback_notice_needed(control: Dict[str, Any], woke: bool, was_pending: bool) -> bool:
+    """Faut-il PREVENIR l'agent, par un message entrant, que la main lui revient ?
+
+    Decision PURE. ``woke`` : un outil ``pulse_browser_handoff`` attendait et a
+    ete reveille. ``was_pending`` : un handoff de cette session avait rendu
+    ``pending`` (fenetre depassee) sans qu'aucun rendu ne le consomme depuis.
+    Sans ``channelSlug``, il n'y a nulle part ou injecter le message : non.
+    """
+    return _handback_wanted(control, woke, was_pending) and bool(control.get("channelSlug"))
+
+
+def handback_message_text(event: str, who: Optional[str]) -> str:
+    """Texte du message entrant qui relance l'agent quand la main lui revient.
+
+    Il doit se suffire : l'agent reprend sur ce seul message, sans l'outil qui
+    lui aurait rendu ``done`` — donc il dit ce qui s'est passe ET quoi faire.
+    """
+    if event == "auto_released":
+        return "\n".join(
+            [
+                "[Navigateur] La main t'a ete rendue d'office (5 min sans action "
+                "humaine sur ton navigateur).",
+                "Regarde d'abord la page (capture ou instantane). Si ce que tu "
+                "attendais n'est pas fait, ecris a l'humain ce qu'il reste a faire, "
+                "sans redemander la main en boucle.",
+            ]
+        )
+    return "\n".join(
+        [
+            "[Navigateur] %s t'a rendu la main sur ton navigateur." % (who or "Un humain"),
+            "Reprends ce que tu faisais, en commencant par regarder la page (capture "
+            "ou instantane) : elle a pu changer (connexion faite, onglet ouvert).",
+        ]
+    )
 
 
 def _task_prefix(key: str) -> str:
@@ -306,6 +395,9 @@ class PulseBrowserProvider(BrowserProvider):
         self._waiters: Dict[str, List["concurrent.futures.Future[Dict[str, Any]]"]] = {}
         # sessionId -> dernier humain annonce a la main (pour le rendre au modele).
         self._last_human: "OrderedDict[str, Optional[str]]" = OrderedDict()
+        # sessionIds dont un handoff a rendu ``pending`` (ensemble ordonne,
+        # borne) : l'agent s'est arrete, le rendu de main devra le relancer.
+        self._handoff_pending: "OrderedDict[str, None]" = OrderedDict()
         # Instant (horloge monotone) jusqu'auquel l'app a dit 501.
         self._unavailable_until: float = 0.0
 
@@ -458,8 +550,11 @@ class PulseBrowserProvider(BrowserProvider):
         waiter: "concurrent.futures.Future[Dict[str, Any]]" = concurrent.futures.Future()
         # Armee AVANT le POST, comme une approbation : l'app ne doit jamais
         # pouvoir rendre la main plus vite que l'outil ne se met a l'ecoute.
+        # Un nouveau handoff remplace un ``pending`` precedent : c'est l'outil
+        # qui recevra le rendu, pas un message.
         with self._lock:
             self._waiters.setdefault(session_id, []).append(waiter)
+            self._handoff_pending.pop(session_id, None)
         try:
             path = "%s/%s/handoff" % (SESSIONS_PATH, quote(session_id, safe=""))
             status, body = self._http("POST", path, {"reason": reason}, HANDOFF_POST_TIMEOUT_SECONDS)
@@ -470,16 +565,41 @@ class PulseBrowserProvider(BrowserProvider):
             try:
                 control = waiter.result(timeout=self._wait_seconds)
             except concurrent.futures.TimeoutError:
-                return pending_result()
+                # Sous le verrou : un rendu arrive pile a l'echeance soit a deja
+                # resolu l'attente (on rend ``done``), soit la trouvera retiree
+                # et marquee ``pending`` (il relancera par message). Jamais les
+                # deux, jamais aucun des deux.
+                with self._lock:
+                    if not waiter.done():
+                        self._drop_waiter(session_id, waiter)
+                        self._mark_handoff_pending_locked(session_id)
+                        return pending_result()
+                control = waiter.result()
             return done_result(control.get("by"))
         finally:
             with self._lock:
-                pending = self._waiters.get(session_id)
-                if pending is not None:
-                    if waiter in pending:
-                        pending.remove(waiter)
-                    if not pending:
-                        self._waiters.pop(session_id, None)
+                self._drop_waiter(session_id, waiter)
+
+    def _drop_waiter(self, session_id: str, waiter: "concurrent.futures.Future[Dict[str, Any]]") -> None:
+        """Retire une attente (verrou tenu par l'appelant)."""
+        pending = self._waiters.get(session_id)
+        if pending is not None:
+            if waiter in pending:
+                pending.remove(waiter)
+            if not pending:
+                self._waiters.pop(session_id, None)
+
+    def _mark_handoff_pending(self, session_id: str) -> None:
+        with self._lock:
+            self._mark_handoff_pending_locked(session_id)
+
+    def _mark_handoff_pending_locked(self, session_id: str) -> None:
+        self._handoff_pending.pop(session_id, None)
+        self._handoff_pending[session_id] = None
+        # Borne : un ``pending`` jamais suivi d'un rendu (session fermee a
+        # l'inactivite sans trame) ne doit pas s'accumuler.
+        while len(self._handoff_pending) > MAX_TRACKED_SESSIONS:
+            self._handoff_pending.popitem(last=False)
 
     # -- Trame browser.control ------------------------------------------------
 
@@ -495,6 +615,16 @@ class PulseBrowserProvider(BrowserProvider):
         if control is None:
             logger.warning("Pulse Chat: trame browser.control inexploitable ignoree")
             return False
+        return self._apply_control(control)[0]
+
+    def _apply_control(self, control: Dict[str, Any]) -> Tuple[bool, bool, Optional[str]]:
+        """Applique une trame deja validee : ``(woke, was_pending, helped_by)``.
+
+        ``woke`` : un outil attendait et a ete reveille. ``was_pending`` : un
+        handoff de cette session avait rendu ``pending`` — CONSOMME ici par
+        tout retour a l'agent (``closed`` compris : il n'y a plus rien a
+        reprendre). ``helped_by`` : l'humain qui avait pris la main.
+        """
         session_id = control["sessionId"]
         with self._lock:
             if control["controller"] == "human":
@@ -504,16 +634,21 @@ class PulseBrowserProvider(BrowserProvider):
                 # pendant qu'un humain l'avait) ne doit pas s'accumuler.
                 while len(self._last_human) > MAX_TRACKED_SESSIONS:
                     self._last_human.popitem(last=False)
-                return False
+                return False, False, None
             helped_by = self._last_human.pop(session_id, None)
+            was_pending = session_id in self._handoff_pending
+            self._handoff_pending.pop(session_id, None)
             waiters = self._waiters.pop(session_id, [])
-        result = {"controller": "agent", "by": helped_by or control["by"]}
-        woke = False
-        for waiter in waiters:
-            if not waiter.done():
-                waiter.set_result(result)
-                woke = True
-        return woke
+            result = {"controller": "agent", "by": helped_by or control["by"]}
+            woke = False
+            # Resolues SOUS le verrou : l'outil qui atteint son echeance au meme
+            # instant le prend aussi, et voit donc soit une attente resolue, soit
+            # plus d'attente du tout (cf. ``_handoff``).
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.set_result(result)
+                    woke = True
+        return woke, was_pending, helped_by
 
     # -- Interne ----------------------------------------------------------------
 
@@ -623,15 +758,60 @@ def deactivate(provider: Optional[PulseBrowserProvider] = None) -> None:
             _providers.remove(provider)
 
 
-def on_control(frame: Any) -> bool:
-    """Trame ``browser.control`` recue par l'adaptateur, transmise a CHAQUE
-    fournisseur inscrit. ``True`` si l'un d'eux avait un outil en attente."""
-    if parse_control_frame(frame) is None:
-        logger.warning("Pulse Chat: trame browser.control inexploitable ignoree")
-        return False
+def _dispatch(control: Dict[str, Any]) -> Tuple[bool, bool, Optional[str]]:
+    """Transmet une trame validee a CHAQUE fournisseur inscrit, et combine :
+    un outil reveille ou un ``pending`` chez l'UN d'eux vaut pour tous."""
     with _providers_lock:
         providers = list(_providers)
-    woke = False
+    woke = was_pending = False
+    helped_by: Optional[str] = None
     for provider in providers:
-        woke = provider.on_control(frame) or woke
-    return woke
+        p_woke, p_pending, p_helper = provider._apply_control(control)
+        woke = woke or p_woke
+        was_pending = was_pending or p_pending
+        helped_by = helped_by or p_helper
+    return woke, was_pending, helped_by
+
+
+def on_control(frame: Any) -> bool:
+    """Trame ``browser.control`` transmise a chaque fournisseur inscrit.
+    ``True`` si l'un d'eux avait un outil en attente. (L'adaptateur appelle
+    ``handle_control``, qui fait la meme chose et decide en plus de la relance.)"""
+    control = parse_control_frame(frame)
+    if control is None:
+        logger.warning("Pulse Chat: trame browser.control inexploitable ignoree")
+        return False
+    return _dispatch(control)[0]
+
+
+def handle_control(frame: Any) -> Optional[Dict[str, Any]]:
+    """Point d'entree de l'adaptateur pour ``browser.control``.
+
+    Reveille les outils qui attendent (comme ``on_control``), puis decide s'il
+    faut PREVENIR l'agent par un message entrant (``handback_notice_needed``).
+    Rend ``{text, channelSlug, channelName, by, sessionId, event}`` — de quoi
+    construire ce message — ou ``None``. UN seul avis par trame, quel que soit
+    le nombre de fournisseurs inscrits. Synchrone et sans I/O.
+    """
+    control = parse_control_frame(frame)
+    if control is None:
+        logger.warning("Pulse Chat: trame browser.control inexploitable ignoree")
+        return None
+    woke, was_pending, helped_by = _dispatch(control)
+    if not _handback_wanted(control, woke, was_pending):
+        return None
+    if not handback_notice_needed(control, woke, was_pending):
+        logger.warning(
+            "Pulse Chat: main rendue sur le navigateur %s sans canal — l'agent ne sera pas relance",
+            control["sessionId"],
+        )
+        return None
+    who = helped_by or control["by"]
+    return {
+        "text": handback_message_text(control["event"], who),
+        "channelSlug": control["channelSlug"],
+        "channelName": control["channelName"],
+        "by": who,
+        "sessionId": control["sessionId"],
+        "event": control["event"],
+    }
