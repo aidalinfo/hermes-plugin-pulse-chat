@@ -10,6 +10,12 @@ description: >
   Depend de la librairie Python `websockets` (pip install websockets).
 author: Pulse
 
+# Fournisseur de navigateur enregistre par ``register(ctx)`` (Hermes >= v2026.9.24).
+# Declaratif : Hermes ne le selectionne QUE par ``browser.cloud_provider: pulse``
+# dans le config.yaml du bot — jamais par auto-detection.
+provides_browser_providers:
+  - pulse
+
 # Les entrees ``requires_env`` sont exposees dans l'UI ``hermes config``.
 requires_env:
   - name: PULSE_CHAT_URL
