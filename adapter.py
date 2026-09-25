@@ -129,6 +129,13 @@ from .voice import (
 from .classification import classify_outbound, parse_tool  # noqa: F401  (re-export)
 from .hello import build_hello, parse_profiles
 from .metrics import extract_metrics
+from .todos import (
+    TODO_TOOL_NAMES,
+    build_todo_payload,
+    parse_todo_result,
+    raw_of,
+    todo_message_id,
+)
 from .reconnect import is_retryable_ws_error, reconnect_delay
 
 from gateway.platforms.base import (
@@ -217,6 +224,10 @@ _SESSION_HEADER = "x-hermes-session"
 # simultanement (un par tour de parole ; au-dela, une fin de flux s'est perdue).
 DEFAULT_SAMPLE_RATE = 24000
 _AUDIO_STREAMS_MAX = 8
+
+#: Tours dont une carte de plan a deja ete postee (cf. ``_forward_todo_plan``).
+#: Borne : un tour ne se « referme » jamais explicitement cote plugin.
+_MAX_TODO_TURNS = 200
 
 #: Le streamer Voxtral a-t-il fini par s'enregistrer ? `None` = pas encore su.
 _voxtral_registered: Optional[bool] = None
@@ -467,6 +478,14 @@ class PulseChatAdapter(BasePlatformAdapter):
         # lui ouvre un thread et une boucle a lui), et une Future asyncio ne
         # s'attend pas depuis une autre boucle que la sienne.
         self._pending_gates: Dict[str, "concurrent.futures.Future[Dict[str, Any]]"] = {}
+        # Plan de taches (hook ``post_tool_call``) : tours deja dotes d'une
+        # carte, et verrou qui SERIALISE les envois. Deux ecritures du meme tour
+        # partent dans l'ordre ou l'agent les a faites ; sans le verrou, deux
+        # POST en vol (``asyncio.to_thread``) pouvaient arriver dans le
+        # desordre, et la carte finissait sur l'etat ANCIEN — un plan qui
+        # recule sans que rien ne le dise. Cree paresseusement, SUR la boucle.
+        self._todo_turns: "OrderedDict[str, None]" = OrderedDict()
+        self._todo_lock: Optional[asyncio.Lock] = None
         # Boucle du WebSocket, capturee a la connexion : c'est sur elle que le
         # handler fait poster la demande.
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -2159,6 +2178,33 @@ class PulseChatAdapter(BasePlatformAdapter):
             )
         return SendResult(success=True, message_id=hermes_id)
 
+    async def _post_todo_plan(self, payload: Dict[str, Any], message_id: str) -> None:
+        """Poste une carte de plan, dans l'ORDRE des ecritures de l'agent.
+
+        Jamais d'exception vers l'appelant : c'est un filet d'affichage, pas un
+        envoi que l'agent attend. Un echec se journalise ; un 400 dit le plus
+        souvent « app anterieure au champ ``todos`` » (schema ``.strict()``).
+        """
+        if self._todo_lock is None:
+            self._todo_lock = asyncio.Lock()
+        async with self._todo_lock:
+            try:
+                result = await self._post_agent_message(payload, message_id)
+            except Exception as exc:  # pragma: no cover - filet
+                logger.debug("Pulse Chat: plan de taches non poste — %s", exc)
+                return
+        if not getattr(result, "success", False):
+            error = getattr(result, "error", "") or ""
+            if "400" in error:
+                _warn_once(
+                    "todo_plan_400",
+                    "Pulse Chat: plan de taches refuse (HTTP 400) — l'app est "
+                    "probablement anterieure au champ `todos` ; la carte "
+                    "n'apparaitra qu'apres sa mise a jour.",
+                )
+            else:
+                logger.debug("Pulse Chat: plan de taches non poste — %s", error)
+
     def _post_json(self, url: str, payload: Dict[str, Any]) -> int:
         request = urllib.request.Request(
             url,
@@ -2320,6 +2366,122 @@ async def _pulse_request_approval(args: Dict[str, Any], **_kwargs: Any) -> str:
         return tool_result(reply)
     finally:
         adapter._pending_gates.pop(request_id, None)
+
+
+def _is_delegated_child() -> bool:
+    """Vrai pendant l'execution d'un enfant de ``delegate_task``."""
+    try:
+        from agent.delegation_context import is_delegated_child_context
+
+        return bool(is_delegated_child_context())
+    except Exception:
+        return False
+
+
+def _forward_todo_plan(result: Any, *, turn_id: str, task_id: str, session_id: str) -> None:
+    """Relaie le plan de taches de l'agent vers la carte du fil.
+
+    Tout ce qui ne va pas s'arrete ici EN SILENCE (journal debug) : ce chemin
+    est un affichage, il ne doit jamais faire echouer un tour d'Hermes.
+
+    Le canal vient du contexte de session (``ContextVar`` copiee jusqu'au
+    thread du hook, cf. docstring de ``_on_post_tool_call``), jamais d'un
+    argument : meme regle que ``pulse_request_approval``.
+    """
+    try:
+        from gateway.session_context import get_session_env
+
+        platform = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip().lower()
+        chat_id = str(get_session_env("HERMES_SESSION_CHAT_ID", "") or "").strip()
+    except Exception:
+        return
+    # STRICT : une plateforme vide ne prouve pas qu'on parle a Pulse Chat (CLI,
+    # cron), et un identifiant de chat Telegram poste ici ferait un 404 de plus.
+    if platform != "pulse_chat" or not chat_id:
+        return
+    # Le plan d'un sous-agent n'est pas celui que la conversation suit : il
+    # ferait apparaitre une seconde carte qui ne dit pas qui la tient.
+    if _is_delegated_child():
+        return
+    steps = parse_todo_result(result)
+    if steps is None:
+        logger.debug("Pulse Chat: resultat todo_list illisible — aucune carte")
+        return
+    message_id = todo_message_id(turn_id=turn_id, task_id=task_id, session_id=session_id)
+    if message_id is None:
+        logger.debug("Pulse Chat: ni turn_id ni task_id ni session_id — aucune carte de plan")
+        return
+    adapter = _live_adapter()
+    if adapter is None or adapter._loop is None:
+        logger.debug("Pulse Chat: plan de taches non relaye (adaptateur deconnecte)")
+        return
+    turns = adapter._todo_turns
+    if not steps and message_id not in turns:
+        # Une lecture d'un plan vide, sans carte ce tour-ci : rien a montrer.
+        # Mais si ce tour a DEJA une carte, l'agent vient de vider son plan et
+        # la carte doit le dire, sinon elle resterait sur l'etat d'avant.
+        return
+    turns[message_id] = None
+    turns.move_to_end(message_id)
+    while len(turns) > _MAX_TODO_TURNS:
+        turns.popitem(last=False)
+    payload = build_todo_payload(chat_id, steps, raw_of(result), message_id)
+    # Planifie sur la boucle du WebSocket, SANS attendre : le thread du hook
+    # rend la main aussitot. L'ordre des envois est garanti par le verrou de
+    # ``_post_todo_plan`` (``asyncio.Lock`` est FIFO, et les hooks d'un meme
+    # agent sont appeles l'un apres l'autre).
+    asyncio.run_coroutine_threadsafe(adapter._post_todo_plan(payload, message_id), adapter._loop)
+
+
+def _on_post_tool_call(
+    tool_name: str = "",
+    result: Any = None,
+    task_id: str = "",
+    session_id: str = "",
+    turn_id: str = "",
+    **_kwargs: Any,
+) -> None:
+    """Hook ``post_tool_call`` d'Hermes — ne regarde QUE ``todo_list``/``todo``.
+
+    Hermes (v2026.9.24, ``hermes_cli/plugins_dispatch.py``) fait tourner ce
+    rappel sur un thread demon ``hermes-hook-*``, borne a 30 s
+    (``plugins.hook_callback_timeout``), sous ``contextvars.copy_context()`` du
+    thread qui a execute l'outil — la boucle d'agent, elle-meme lancee par la
+    passerelle sous ``copy_context`` apres ``set_session_vars``. Le contexte
+    de session y est donc VISIBLE. La valeur de retour est ignoree.
+
+    Appele pour CHAQUE outil : le nom est teste en premier, et tout autre outil
+    ressort sans rien lire. Aucune exception ne remonte dans Hermes.
+    """
+    if tool_name not in TODO_TOOL_NAMES:
+        return None
+    try:
+        _forward_todo_plan(
+            result,
+            turn_id=str(turn_id or ""),
+            task_id=str(task_id or ""),
+            session_id=str(session_id or ""),
+        )
+    except Exception as exc:
+        logger.debug("Pulse Chat: plan de taches ignore — %s", exc)
+    return None
+
+
+def _register_todo_hook(ctx) -> None:
+    """Hook du plan de taches. Isole : un echec ne fait tomber ni la
+    plateforme ni les outils."""
+    register_hook = getattr(ctx, "register_hook", None)
+    if register_hook is None:
+        _warn_once(
+            "todo_hook_missing",
+            "Pulse Chat: cet Hermes ne connait pas register_hook — le plan de "
+            "taches de l'agent n'apparaitra pas dans le fil.",
+        )
+        return
+    try:
+        register_hook("post_tool_call", _on_post_tool_call)
+    except Exception as exc:
+        _warn_once("todo_hook_failed", f"Pulse Chat: hook du plan de taches non enregistre — {exc}")
 
 
 def _session_chat_id() -> str:
@@ -2730,3 +2892,4 @@ def register(ctx):
     _register_workspace_tools(ctx)
     _register_guide_skill(ctx)
     _register_browser(ctx)
+    _register_todo_hook(ctx)
