@@ -344,6 +344,32 @@ Ce qui ne se devine pas :
 - **Nom `pulse`, jamais `browser-use`** : Browser Use saute le fournisseur qui
   porte exactement ce nom.
 
+### Plan de tâches de l'agent (hook `post_tool_call`)
+
+À partir de la **1.13.0**, la liste d'étapes interne d'Hermes (`todo_list`,
+alias `todo` avant v2026.9.7) apparaît dans le fil comme une carte « Plan de
+tâches » : barre d'avancement, étape en cours, checklist au dépli.
+
+- **Le texte n'en dit rien** : côté plateforme, Hermes n'envoie qu'une ligne
+  `📋 Updating tasks planning 3 task(s)`. Le plugin enregistre un hook
+  `post_tool_call` et lit le **résultat** de l'outil, qui porte toujours la
+  liste complète (`{"todos": [...], "revision": n, …}`).
+- **Filtré au premier test** sur `todo_list` / `todo` : tout autre outil ressort
+  sans rien lire. Sessions **Pulse Chat seulement** (`HERMES_SESSION_PLATFORM ==
+  pulse_chat`, plateforme vide comprise dans les refus), enfants de
+  `delegate_task` ignorés. Le hook tourne sur un thread `hermes-hook-*` sous
+  `copy_context()` : le contexte de session y est visible, le canal en vient.
+- **Une carte par tour** : `hermesMessageId = todo:<turn_id>` (repli `task_id`,
+  puis `session_id`) — l'app met la carte à jour tant que le tour dure. Les
+  envois sont planifiés sur la boucle du WebSocket sans attendre et
+  **sérialisés** (un plan ne doit jamais « reculer » parce que deux POST se sont
+  doublés). Un plan vide sans carte ce tour-ci n'en crée pas.
+- **Rien n'est décidé ici** : la phase (en cours / terminé), les bornes et le
+  compteur sont dérivés par l'app. Un résultat illisible ne produit aucune
+  carte et ne lève jamais dans Hermes. Face à une app antérieure au champ
+  `todos`, le POST est refusé en 400 (une fois journalisé) : rien d'autre ne
+  change.
+
 ### Router un envoi vers un canal Pulse Chat
 
 Le plugin déclare son propre parseur de cible
