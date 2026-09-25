@@ -271,7 +271,7 @@ Aucune mise à jour de l'app n'est requise : les routes existent déjà.
 
 ### Navigateur des agents (fournisseur `pulse`, `pulse_browser_handoff`)
 
-À partir de la **1.11.0**, le plugin enregistre un **fournisseur de
+À partir de la **1.12.0**, le plugin enregistre un **fournisseur de
 navigateur** Hermes nommé `pulse` (`ctx.register_browser_provider`, Hermes
 **≥ v2026.9.24**). Les outils de navigation d'Hermes — `browser_exec`
 (Browser Use) comme `browser_*` (agent-browser) — pilotent alors le Chromium
@@ -420,7 +420,7 @@ plugins:
     - pulse-chat
 
 browser:
-  cloud_provider: pulse     # OBLIGATOIRE pour le navigateur des agents (≥ 1.11.0)
+  cloud_provider: pulse     # OBLIGATOIRE pour le navigateur des agents (≥ 1.12.0)
 ```
 
 Pour que l'agent **parle** (notes vocales), ajouter au même fichier :
