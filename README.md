@@ -122,6 +122,15 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
   hoquet inexplicable. `decode_audio_frame()` est la définition exécutable du
   format — l'app la réimplémente en TypeScript d'après elle.
 
+- **Approbations du garde-fou en CARTE** (`send_exec_approval`) : depuis Hermes
+  **v2026.9.14**, le runner ne regarde plus seulement si la méthode existe — il
+  consulte d'abord `supports_exec_approval_buttons()`, dont la version de base
+  ne dit oui que si `_send_exec_approval_prompt` est surchargé. L'adaptateur
+  surcharge donc la **sonde** (réponse `True`) : sans elle, Hermes repostait son
+  invite texte « Reply `/approve`… » sans aucune erreur (corrigé en **1.13.1**).
+  La sonde plutôt que le nouveau crochet, pour rester compatible avec un Hermes
+  antérieur qui ne l'appelle pas.
+
 - **Questions de l'agent en CARTE** (`questions.py`, `send_clarify`) : quand
   Hermes pose une question à l'humain (primitive `clarify`) et bloque son thread
   en attendant, l'adaptateur poste une carte à boutons dans le fil plutôt que de
