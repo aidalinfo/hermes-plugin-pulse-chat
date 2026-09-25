@@ -1727,6 +1727,26 @@ class PulseChatAdapter(BasePlatformAdapter):
         finally:
             self._pending_approvals.pop(request_id, None)
 
+    @classmethod
+    def supports_exec_approval_buttons(cls) -> bool:
+        """Sonde du runner d'Hermes >= v2026.9.14 : « cet adaptateur rend-il une carte ? »
+
+        Depuis ``ad305bead5`` (« send_exec_approval is a base template method »),
+        ``BasePlatformAdapter`` definit lui-meme ``send_exec_approval``, et le
+        runner (``gateway/run_turn_runner.py::_renders_exec_approval_buttons``)
+        consulte CETTE sonde avant tout. Sa version de base ne dit oui que si
+        ``_send_exec_approval_prompt`` est surcharge — ce qu'on ne fait pas :
+        on surcharge ``send_exec_approval`` en entier. Heritee, elle repondait
+        non, et Hermes postait son invite texte « Reply /approve… » sans
+        qu'aucune erreur n'apparaisse.
+
+        On repond oui plutot que d'implementer ``_send_exec_approval_prompt`` :
+        un Hermes anterieur n'appelle pas ce crochet, et le plugin doit tourner
+        sur les deux. Oui sans condition est sur : un echec d'envoi de la carte
+        (``success=False``) fait reprendre l'invite texte par le runner.
+        """
+        return True
+
     async def send_exec_approval(
         self,
         chat_id: str,
@@ -1740,8 +1760,9 @@ class PulseChatAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Rend le garde-fou d'Hermes sous forme de CARTE, pas d'invite texte.
 
-        Point d'extension du gateway (``gateway/run.py``) : il regarde si la
-        CLASSE de l'adaptateur definit cette methode. Sans elle, il retombe sur
+        Point d'extension du gateway : il regarde si la CLASSE de l'adaptateur
+        definit cette methode (depuis v2026.9.14, par la sonde
+        ``supports_exec_approval_buttons`` ci-dessus). Sans elle, il retombe sur
         un message texte « tapez /approve » — lisible sur Telegram, absurde ici,
         ou l'app a une carte a boutons et une table ``approvalRequest``. C'est
         exactement ce qui se passait : la chaine d'approbation cote app etait
