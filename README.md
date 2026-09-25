@@ -20,16 +20,17 @@ hermes-plugin/pulse-chat/
 Ce plugin est publié sur **github.com/aidalinfo/hermes-plugin-pulse-chat**
 (miroir automatique du monorepo `PROJET-pulse-chat`, dossier `hermes-plugin/pulse-chat/`).
 
-Voir aussi [`SKILL.md`](./SKILL.md) : ce que **l'agent** doit savoir pour se
+Voir aussi [`skills/guide/SKILL.md`](./skills/guide/SKILL.md) (enregistré en `pulse-chat:guide`, nommé dans `platform_hint`) : ce que **l'agent** doit savoir pour se
 servir de Pulse Chat une fois branché : les outils MCP de `/mcp-hermes`
-(`connectors_available` et les capacités `connector_*`, le plan de travail
-`plan_*`, `routine_deliver`), **ce qui n'en est pas** (l'écriture au coffre-fort
-et la publication d'un fichier passent par les outils du plugin
-`pulse_vault_write` et `pulse_publish_artifact`, les approbations par
-`request_approval()` côté Hermes), le piège `plan_*` vs `tasks_*`, brouillon
-contre envoi réel, les pièces jointes par référence préfixée, et quoi faire
-d'un refus. Format non vérifié dans une image Hermes réelle : voir
-l'avertissement en tête du fichier.
+(lecture de canal `channels_list` / `channel_context` / `channel_members` /
+`channel_artifact` / coffre, `connectors_available` et les capacités
+`connector_*`, le plan de travail `plan_*`, `routine_deliver`), l'écriture au
+coffre et la publication d'un fichier (outils du plugin `pulse_vault_write` et
+`pulse_publish_artifact`, secours MCP `channel_vault_upload_url` /
+`channel_artifact_publish`), le piège `plan_*` vs `tasks_*`, brouillon contre
+envoi réel, les pièces jointes par référence préfixée, et quoi faire d'un
+refus. Jusqu'à la 1.11.0, ce fichier vivait à la racine et n'était enregistré
+nulle part : aucun agent ne le lisait.
 
 ```bash
 # Voie 1 — CLI Hermes

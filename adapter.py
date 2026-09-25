@@ -2421,6 +2421,32 @@ def _register_gate_tool(ctx) -> None:
         _warn_once("gate_skill_failed", f"Pulse Chat: skill {GATE_SKILL_NAME} non enregistre — {exc}")
 
 
+#: Skill GENERAL (``skills/guide/SKILL.md``, resolu en ``pulse-chat:guide``).
+#: Il vivait a la racine du depot sous le nom ``pulse-chat`` et n'etait
+#: enregistre NULLE PART : seul ``approvals`` passait par ``register_skill``,
+#: donc le mode d'emploi des outils MCP (lecture de canal, plan de travail,
+#: coffre) n'atteignait aucun agent — sans qu'aucune erreur ne le dise.
+GUIDE_SKILL_NAME = "guide"
+
+
+def _register_guide_skill(ctx) -> None:
+    """Isole, comme les autres : un echec ne fait tomber ni la plateforme ni
+    les outils."""
+    try:
+        skill_path = pathlib.Path(__file__).resolve().parent / "skills" / GUIDE_SKILL_NAME / "SKILL.md"
+        ctx.register_skill(
+            GUIDE_SKILL_NAME,
+            skill_path,
+            description=(
+                "Se servir de Pulse Chat : lire un canal (channels_list, channel_context, "
+                "channel_members), le plan de travail plan_*, le coffre et la publication "
+                "d'un fichier, les connecteurs delegues, et quoi faire d'un refus."
+            ),
+        )
+    except Exception as exc:
+        _warn_once("guide_skill_failed", f"Pulse Chat: skill {GUIDE_SKILL_NAME} non enregistre — {exc}")
+
+
 def register(ctx):
     """Point d'entree plugin : appele par le systeme de plugins Hermes."""
     entry = dict(
@@ -2470,7 +2496,20 @@ def register(ctx):
             "local_path, THEN pulse_publish_artifact with kind='file' and the "
             "same path. Writing alone shows nothing in the conversation. Never "
             "tell the human a file is available before pulse_publish_artifact "
-            "returned published."
+            "returned published. If those two tools are missing, the Pulse Chat "
+            "MCP server offers channel_vault_upload_url (then PUT the file) and "
+            "channel_artifact_publish instead.\n\n"
+            # Le seul texte qui atteint TOUT agent : sans lui, le skill guide
+            # ci-dessous n'existe pour personne (``register_skill`` = chargement
+            # explicite), et un agent a qui une publication a ete refusee
+            # finissait par ecrire son propre client WebSocket.
+            "Pulse Chat MCP tools (when connected): channels_list gives the "
+            "`channel` slugs every other tool needs; channel_context reads what "
+            "was said before you were called; channel_members tells who is here; "
+            "plan_* is YOUR task board (never connector_tasks_*). Never open your "
+            "own WebSocket to Pulse Chat nor call its /api/agent routes from a "
+            "script: use these tools, and on a refusal follow its `hint`. "
+            "Details: load the skill pulse-chat:guide."
         ),
     )
     # ``parse_target_ref_fn`` n'existe pas sur les Hermes anterieurs a
@@ -2495,3 +2534,4 @@ def register(ctx):
         ctx.register_platform(**entry)
     _register_gate_tool(ctx)
     _register_workspace_tools(ctx)
+    _register_guide_skill(ctx)
