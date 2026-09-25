@@ -147,7 +147,7 @@ HANDOFF_TOOL_DESCRIPTION = (
     "commencant par regarder la page — elle a change), `pending` (personne n'a "
     "rendu la main a temps : ARRETE-TOI, ne rappelle pas l'outil en boucle, "
     "ecris a l'humain ce que tu attends de lui ; un message `[Navigateur]` te "
-    "relancera automatiquement quand la main te sera rendue), `refused` "
+    "relancera quand la main te sera rendue), `refused` "
     "(lis `code` et `message`). Tant qu'un humain a la main, tes commandes de "
     "navigation sont refusees (`pulse:human_in_control`) : c'est normal."
 )
@@ -236,9 +236,9 @@ def pending_result() -> str:
             "next": (
                 "Personne n'a rendu la main dans le delai. ARRETE-TOI : ne rappelle "
                 "pas l'outil, n'insiste pas dans le navigateur. Ecris a l'humain ce "
-                "que tu attends de lui (se connecter, saisir le code...). Tu seras "
-                "prevenu AUTOMATIQUEMENT, par un message, quand la main te sera "
-                "rendue : ne lui demande pas de te prevenir, et reprends a ce "
+                "que tu attends de lui (se connecter, saisir le code...) et qu'il "
+                "te le dise quand c'est fait. Un message `[Navigateur]` te "
+                "relancera aussi quand la main te sera rendue : reprends a ce "
                 "moment-la."
             ),
         }
@@ -335,18 +335,23 @@ def handback_message_text(event: str, who: Optional[str]) -> str:
     if event == "auto_released":
         return "\n".join(
             [
-                "[Navigateur] La main t'a ete rendue d'office (5 min sans action "
-                "humaine sur ton navigateur).",
+                # « D'office » a DEUX causes cote app : 5 min sans entree
+                # humaine, ou la personne a perdu l'acces au canal. Le texte
+                # n'en affirme aucune — l'agent n'a rien a en faire de plus.
+                "[Navigateur] La main t'a ete rendue d'office (plus d'action "
+                "humaine depuis 5 min, ou la personne n'a plus acces a ce canal).",
                 "Regarde d'abord la page (capture ou instantane). Si ce que tu "
                 "attendais n'est pas fait, ecris a l'humain ce qu'il reste a faire, "
-                "sans redemander la main en boucle.",
+                "sans redemander la main en boucle. Si tu n'avais rien en cours, "
+                "ne fais rien.",
             ]
         )
     return "\n".join(
         [
             "[Navigateur] %s t'a rendu la main sur ton navigateur." % (who or "Un humain"),
             "Reprends ce que tu faisais, en commencant par regarder la page (capture "
-            "ou instantane) : elle a pu changer (connexion faite, onglet ouvert).",
+            "ou instantane) : elle a pu changer (connexion faite, onglet ouvert). "
+            "Si tu n'avais rien en cours, ne fais rien.",
         ]
     )
 
@@ -662,6 +667,11 @@ class PulseBrowserProvider(BrowserProvider):
 
     def _remember(self, key: str, session_id: str, channel: str) -> None:
         with self._lock:
+            # Une ouverture = un NOUVEAU tour : le `pending` d'un tour precedent
+            # n'attend plus rien. Garde, il ferait injecter « reprends ce que tu
+            # faisais » EN PLEIN tour suivant si la main est rendue pendant ; un
+            # rendu apres la fin de ce tour, lui, est couvert par `turnEnded`.
+            self._handoff_pending.pop(session_id, None)
             previous = self._sessions.pop(key, None)
             # Une ouverture = un ``close_session`` a venir : on compte CHAQUE
             # ``create_session``. Mais une cle reecrite vers une AUTRE session

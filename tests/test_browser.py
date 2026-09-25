@@ -592,9 +592,18 @@ class TestTexteDeRelance:
         )
 
     def test_rendu_d_office(self):
+        """« D'office » couvre DEUX causes cote app — 5 min sans entree, ou la
+        personne a perdu l'acces au canal : le texte ne doit pas en affirmer une."""
         text = browser.handback_message_text("auto_released", None)
-        assert text.startswith("[Navigateur] La main t'a ete rendue d'office (5 min sans action humaine")
+        assert text.startswith("[Navigateur] La main t'a ete rendue d'office")
+        assert "n'a plus acces" in text
         assert "sans redemander la main en boucle" in text
+
+    def test_rien_en_cours_rien_a_faire(self):
+        """Une prise de main « pour regarder » ne doit pas faire reprendre une
+        tache deja close."""
+        for event in ("released", "auto_released"):
+            assert "Si tu n'avais rien en cours, ne fais rien" in browser.handback_message_text(event, "Killian")
 
 
 @pytest.fixture
@@ -619,9 +628,10 @@ class TestHandleControl:
     def test_la_consigne_pending_annonce_la_relance(self):
         advice = json.loads(browser.pending_result())["next"]
         assert "ARRETE-TOI" in advice
-        assert "tu seras prevenu" in advice.lower()
-        # L'ancienne consigne faisait demander a l'humain de « prevenir ».
-        assert "qu'il te previenne" not in advice
+        assert "[navigateur]" in advice.lower()
+        # Ne JAMAIS interdire de demander a l'humain de prevenir : face a une
+        # app qui n'envoie pas encore la relance, ce serait le seul reveil.
+        assert "ne lui demande pas" not in advice.lower()
 
     def test_tour_fini_rend_un_avis(self, _inscrit):
         _inscrit(_provider()[0])
@@ -668,6 +678,19 @@ class TestHandleControl:
         assert browser.handle_control(_rendu("released", False)) is not None
         assert "s1" not in provider._handoff_pending
         # Consomme : un second rendu, tour en cours, ne relance plus.
+        assert browser.handle_control(_rendu("released", False)) is None
+
+    def test_un_pending_du_tour_precedent_ne_relance_pas_en_plein_tour(self, _inscrit):
+        """Tour 1 : handoff -> pending, fin du tour. La personne ECRIT au lieu
+        de rendre la main, ce qui ouvre le tour 2 sur la meme session chaude.
+        Rendre la main pendant le tour 2 ne doit pas l'interrompre : le pending
+        n'attendait plus rien (et un tour fini est couvert par turnEnded)."""
+        http, _ = _handoff_http()
+        provider = _inscrit(_provider(http=http, wait_seconds=0.05)[0])
+        self._pending(provider)
+        provider.close_session("s1")
+        provider.create_session("t1")
+        assert "s1" not in provider._handoff_pending
         assert browser.handle_control(_rendu("released", False)) is None
 
     def test_un_nouveau_handoff_oublie_le_pending(self, _inscrit):

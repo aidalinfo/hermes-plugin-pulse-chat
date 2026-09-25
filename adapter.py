@@ -443,6 +443,11 @@ class PulseChatAdapter(BasePlatformAdapter):
         self._session_token: Optional[str] = None
         # Derniere source par canal — cle de session d'une interruption.
         self._last_source: Dict[str, Any] = {}
+        # Dernier bloc ``agentConfig`` recu par canal : un tour INJECTE par le
+        # plugin (relance apres un rendu de main) n'a pas de trame d'origine, et
+        # partir sans lui priverait l'agent de son ton, de ses consignes et
+        # surtout de ``disabledTools`` — des outils que l'admin a retires.
+        self._last_agent_config: Dict[str, Optional[Dict[str, Any]]] = {}
         # Capacite audio annoncee par l'app au `hello.ack` (None = pas de flux).
         self._audio_capability: Optional[Dict[str, Any]] = None
         # Flux audio ouverts, par streamId — bornes pour ne jamais fuir si une
@@ -904,6 +909,7 @@ class PulseChatAdapter(BasePlatformAdapter):
         )
 
         self._last_source[slug] = source
+        self._last_agent_config[slug] = agent_config_metadata(data)
         await self.handle_message(event)
         self._remember_message_id(dedup_key)
         await self._send_ack(message_id)
@@ -2203,7 +2209,7 @@ class PulseChatAdapter(BasePlatformAdapter):
                 "media_urls": [],
                 "media_types": [],
             },
-            None,
+            self._last_agent_config.get(slug),
         )
         self._remember_message_id(message_id)
         logger.info(
@@ -2787,7 +2793,7 @@ BROWSER_HINT = (
     "pulse_browser_handoff with a one-sentence reason and wait; on done, "
     "look at the page again before continuing; on pending, stop and tell "
     "the human in writing what you are waiting for — a [Navigateur] message "
-    "will wake you up when the hand is given back, so do not ask to be told."
+    "will also wake you up when the hand is given back."
 )
 
 

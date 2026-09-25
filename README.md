@@ -364,7 +364,13 @@ Ce qui ne se devine pas :
   entrant** `[Navigateur] …` dans le canal (même chemin que la décision
   tardive d'une approbation). Un tour qui tourne encore n'est pas
   interrompu ; `closed` et une trame sans `event` (app antérieure) n'injectent
-  rien — le comportement d'avant.
+  rien — le comportement d'avant. **Déployer l'app ≥ 0.39.0 AVANT** : c'est
+  elle qui envoie ces champs, et sans eux la consigne de `pending` (« un
+  message te relancera aussi ») ne serait tenue que par l'humain. Le tour
+  injecté emporte le dernier `agentConfig` reçu dans le canal (ton,
+  consignes, `disabledTools`), et une nouvelle ouverture de session oublie le
+  `pending` du tour précédent (sinon un rendu en plein tour suivant
+  l'interromprait).
 - **Nom `pulse`, jamais `browser-use`** : Browser Use saute le fournisseur qui
   porte exactement ce nom.
 

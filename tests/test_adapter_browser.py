@@ -79,11 +79,12 @@ def _aucun_fournisseur_residuel():
     browser.deactivate()
 
 
-def _receive(adapter, frame):
+def _receive(adapter, *frames):
     class _Ws:
         def __aiter__(self):
             async def gen():
-                yield json.dumps(frame)
+                for frame in frames:
+                    yield json.dumps(frame)
 
             return gen()
 
@@ -153,6 +154,29 @@ class TestRelance:
         def boom(frame):
             raise RuntimeError("boum")
 
-        monkeypatch.setattr(browser, "handle_control", boom)
+        calls = []
+
+        def boom_then_ok(frame):
+            calls.append(frame)
+            if len(calls) == 1:
+                raise RuntimeError("boum")
+            return real(frame)
+
+        real = browser.handle_control
+        monkeypatch.setattr(browser, "handle_control", boom_then_ok)
+        # DEUX trames : la seconde prouve que la boucle a survecu a la premiere
+        # (une seule trame passerait aussi par le except de toute la boucle).
+        _receive(adapter, _rendu("released", True), _rendu("released", True))
+        assert len(calls) == 2
+        assert len(dispatched) == 1
+
+
+class TestConfigAgent:
+    def test_le_tour_relance_emporte_la_config_du_dernier_message_du_canal(self):
+        """Ton, consignes et surtout `disabledTools` voyagent PAR MESSAGE : un
+        tour injecte sans eux utiliserait des outils que l'admin a retires."""
+        adapter, dispatched = _adapter()
+        adapter._last_agent_config["compta"] = {"agentConfig": {"disabledTools": ["terminal"]}}
         _receive(adapter, _rendu("released", True))
-        assert dispatched == []
+        assert len(dispatched) == 1
+        assert dispatched[0].metadata == {"agentConfig": {"disabledTools": ["terminal"]}}
