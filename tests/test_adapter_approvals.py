@@ -80,6 +80,28 @@ class TestSendExecApproval:
         # Hermes interroge la classe, pas l'instance (il se protege des mocks).
         assert getattr(adapter_module.PulseChatAdapter, "send_exec_approval", None)
 
+    def test_la_sonde_d_Hermes_9_14_repond_oui(self):
+        # Depuis Hermes v2026.9.14 (ad305bead5), le runner consulte d'abord
+        # ``supports_exec_approval_buttons`` sur toute sous-classe de
+        # ``BasePlatformAdapter`` ; la version de base ne dit oui que si
+        # ``_send_exec_approval_prompt`` est surcharge. Sans surcharge ICI, la
+        # sonde heritee repond non et Hermes reprend son invite texte
+        # « Reply /approve… », sans erreur — constate sur vulcain le 2026-09-26.
+        # Copie de ``gateway/run_turn_runner.py::_renders_exec_approval_buttons``.
+        base = adapter_module.BasePlatformAdapter
+
+        def renders_exec_approval_buttons(adapter_cls):
+            probe = getattr(adapter_cls, "supports_exec_approval_buttons", None)
+            if callable(probe) and issubclass(adapter_cls, base):
+                return bool(probe())
+            return getattr(adapter_cls, "send_exec_approval", None) is not None
+
+        cls = adapter_module.PulseChatAdapter
+        # Definie sur la classe ELLE-MEME : une sonde heritee du vrai
+        # BasePlatformAdapter (absent des stubs) la masquerait sinon.
+        assert "supports_exec_approval_buttons" in vars(cls)
+        assert renders_exec_approval_buttons(cls) is True
+
     def test_poste_une_carte_et_rend_la_main_sans_attendre(self, monkeypatch):
         async def run():
             _capture_resolutions(monkeypatch)

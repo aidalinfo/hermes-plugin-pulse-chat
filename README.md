@@ -122,6 +122,15 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
   hoquet inexplicable. `decode_audio_frame()` est la définition exécutable du
   format — l'app la réimplémente en TypeScript d'après elle.
 
+- **Approbations du garde-fou en CARTE** (`send_exec_approval`) : depuis Hermes
+  **v2026.9.14**, le runner ne regarde plus seulement si la méthode existe — il
+  consulte d'abord `supports_exec_approval_buttons()`, dont la version de base
+  ne dit oui que si `_send_exec_approval_prompt` est surchargé. L'adaptateur
+  surcharge donc la **sonde** (réponse `True`) : sans elle, Hermes repostait son
+  invite texte « Reply `/approve`… » sans aucune erreur (corrigé en **1.13.1**).
+  La sonde plutôt que le nouveau crochet, pour rester compatible avec un Hermes
+  antérieur qui ne l'appelle pas.
+
 - **Questions de l'agent en CARTE** (`questions.py`, `send_clarify`) : quand
   Hermes pose une question à l'humain (primitive `clarify`) et bloque son thread
   en attendant, l'adaptateur poste une carte à boutons dans le fil plutôt que de
@@ -306,6 +315,9 @@ pulse_browser_handoff(reason)  # outil, toolset "pulse_chat"
     -> POST /api/agent/browser/sessions/:id/handoff {reason}
     <- trame WS browser.control {controller: "agent"}  ->  {status: "done"}
     <- rien en 270 s                                   ->  {status: "pending"}
+browser.control {controller: "agent", event, turnEnded, channelSlug}   # ≥ 1.14.0
+    sans outil en attente, tour fini OU handoff en pending
+        ->  message entrant « [Navigateur] … t'a rendu la main … »
 ```
 
 Ce qui ne se devine pas :
@@ -341,8 +353,52 @@ Ce qui ne se devine pas :
   navigateur ». Il n'apparaît que sur un bot réglé en `cloud_provider: pulse`,
   et le paragraphe « Browser » de `platform_hint` aussi — lu UNE fois, à
   l'enregistrement : changer le réglage demande un redémarrage de la passerelle.
+- **Rendre la main RELANCE l'agent (≥ 1.14.0).** Passé les 270 s, l'outil a
+  rendu `pending` et l'agent s'est arrêté ; un humain qui rend la main plus
+  tard — ou qui l'avait prise alors que l'agent n'attendait rien et que son
+  tour est fini — ne réveillait personne, et l'agent ne reprenait jamais. La
+  trame porte désormais `event` (`released` · `auto_released` · `closed`),
+  `turnEnded` et `channelSlug`/`channelName` : si aucun outil n'attend, que
+  l'`event` est un rendu, et que le tour est fini **ou** qu'un handoff de
+  cette session avait rendu `pending`, le plugin injecte un **message
+  entrant** `[Navigateur] …` dans le canal (même chemin que la décision
+  tardive d'une approbation). Un tour qui tourne encore n'est pas
+  interrompu ; `closed` et une trame sans `event` (app antérieure) n'injectent
+  rien — le comportement d'avant. **Déployer l'app ≥ 0.39.0 AVANT** : c'est
+  elle qui envoie ces champs, et sans eux la consigne de `pending` (« un
+  message te relancera aussi ») ne serait tenue que par l'humain. Le tour
+  injecté emporte le dernier `agentConfig` reçu dans le canal (ton,
+  consignes, `disabledTools`), et une nouvelle ouverture de session oublie le
+  `pending` du tour précédent (sinon un rendu en plein tour suivant
+  l'interromprait).
 - **Nom `pulse`, jamais `browser-use`** : Browser Use saute le fournisseur qui
   porte exactement ce nom.
+
+### Plan de tâches de l'agent (hook `post_tool_call`)
+
+À partir de la **1.13.0**, la liste d'étapes interne d'Hermes (`todo_list`,
+alias `todo` avant v2026.9.7) apparaît dans le fil comme une carte « Plan de
+tâches » : barre d'avancement, étape en cours, checklist au dépli.
+
+- **Le texte n'en dit rien** : côté plateforme, Hermes n'envoie qu'une ligne
+  `📋 Updating tasks planning 3 task(s)`. Le plugin enregistre un hook
+  `post_tool_call` et lit le **résultat** de l'outil, qui porte toujours la
+  liste complète (`{"todos": [...], "revision": n, …}`).
+- **Filtré au premier test** sur `todo_list` / `todo` : tout autre outil ressort
+  sans rien lire. Sessions **Pulse Chat seulement** (`HERMES_SESSION_PLATFORM ==
+  pulse_chat`, plateforme vide comprise dans les refus), enfants de
+  `delegate_task` ignorés. Le hook tourne sur un thread `hermes-hook-*` sous
+  `copy_context()` : le contexte de session y est visible, le canal en vient.
+- **Une carte par tour** : `hermesMessageId = todo:<turn_id>` (repli `task_id`,
+  puis `session_id`) — l'app met la carte à jour tant que le tour dure. Les
+  envois sont planifiés sur la boucle du WebSocket sans attendre et
+  **sérialisés** (un plan ne doit jamais « reculer » parce que deux POST se sont
+  doublés). Un plan vide sans carte ce tour-ci n'en crée pas.
+- **Rien n'est décidé ici** : la phase (en cours / terminé), les bornes et le
+  compteur sont dérivés par l'app. Un résultat illisible ne produit aucune
+  carte et ne lève jamais dans Hermes. Face à une app antérieure au champ
+  `todos`, le POST est refusé en 400 (une fois journalisé) : rien d'autre ne
+  change.
 
 ### Router un envoi vers un canal Pulse Chat
 
