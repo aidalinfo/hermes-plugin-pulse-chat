@@ -1278,7 +1278,7 @@ class PulseChatAdapter(BasePlatformAdapter):
     ) -> Optional[str]:
         """Publie un artifact dans la conversation.
 
-        ``kind`` : mermaid | markdown | svg | html | drawio | file.
+        ``kind`` : mermaid | markdown | svg | html | drawio | file | motion.
 
         Un artifact est un POINTEUR vers un fichier du coffre : le contenu
         n'existe qu'une fois, dans le coffre du canal. Deux usages :
@@ -1299,6 +1299,15 @@ class PulseChatAdapter(BasePlatformAdapter):
         ``vault_write``, publier ensuite. Republier le MEME ``artifact_id`` sur
         un fichier reecrit cree une nouvelle version : l'app archive l'etat
         precedent (versionnement du coffre).
+
+        ``kind="motion"`` est un FILM : une page HTML dont chaque image est une
+        fonction de ``t``, exposant ``window.__duration`` (secondes) et
+        ``window.__renderAt(t)``, polices integrees en ``data:`` (aucune
+        ressource distante), <= 2 Mo. ``path=`` est la voie RECOMMANDEE — un
+        film volumineux ne passe pas par ``content=``, plafonne comme les
+        autres types texte a 400 000 caracteres : ecrire d'abord avec
+        ``vault_write``, publier ensuite. Un petit film peut encore passer par
+        ``content=``.
 
         Retourne l'``artifact_id`` utilise, ou ``None`` en cas d'echec.
         """

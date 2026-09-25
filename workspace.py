@@ -76,7 +76,12 @@ PUBLISH_DESCRIPTION = (
     "fichier du coffre. `kind='file'` pour un fichier quelconque (PDF, tableur, "
     "image, archive) : il doit avoir ete ecrit AVANT avec pulse_vault_write, et tu "
     "donnes son `path` — la carte se telecharge, et un PDF ou une image s'ouvre en "
-    "apercu. Pour un contenu TEXTE rendu dans le panneau (`markdown`, `mermaid`, "
+    "apercu. `kind='motion'` pour un FILM : une page HTML dont chaque image est "
+    "une fonction de `t`, qui expose `window.__duration` (secondes) et "
+    "`window.__renderAt(t)`, polices integrees en `data:` (aucune ressource "
+    "distante), <= 2 Mo — ecris-le d'abord avec pulse_vault_write (`local_path`), "
+    "puis publie avec `path` : il se lit dans la carte. Pour un contenu TEXTE "
+    "rendu dans le panneau (`markdown`, `mermaid`, "
     "`svg`, `html`, `drawio`), donne directement `content` : il est ecrit au coffre "
     "et publie en un seul appel. L'identite de la carte est `artifact_id` (par "
     "defaut derive du type et du titre) : republier le meme identifiant cree une "
@@ -130,7 +135,9 @@ PUBLISH_SCHEMA: Dict[str, Any] = {
                 "enum": list(ARTIFACT_KINDS),
                 "description": (
                     "`file` pour un fichier deja ecrit au coffre (PDF, tableur...) ; "
-                    "sinon le type du contenu texte rendu dans le panneau."
+                    "`motion` pour un FILM (page HTML animee par `t`, <= 2 Mo, "
+                    "publie par `path` comme `file`) ; sinon le type du contenu "
+                    "texte rendu dans le panneau."
                 ),
             },
             "title": {
@@ -142,16 +149,19 @@ PUBLISH_SCHEMA: Dict[str, Any] = {
                 "type": "string",
                 "maxLength": 400,
                 "description": (
-                    "Chemin du fichier dans le coffre, OBLIGATOIRE pour `kind='file'` "
-                    "(le meme que celui passe a pulse_vault_write). Exclusif de `content`."
+                    "Chemin du fichier dans le coffre, OBLIGATOIRE pour `kind='file'`, "
+                    "RECOMMANDE pour `kind='motion'` (un film volumineux ne passe pas "
+                    "par `content`, plafonne a 400 000 caracteres) — le meme que celui "
+                    "passe a pulse_vault_write. Exclusif de `content`."
                 ),
             },
             "content": {
                 "type": "string",
                 "maxLength": MAX_ARTIFACT_CONTENT_LENGTH,
                 "description": (
-                    "Contenu texte (Markdown, source Mermaid, SVG, HTML, XML draw.io). "
-                    "Interdit pour `kind='file'`. Exclusif de `path`."
+                    "Contenu texte (Markdown, source Mermaid, SVG, HTML, XML draw.io, "
+                    "ou un petit film HTML). Interdit pour `kind='file'`. Exclusif de "
+                    "`path`."
                 ),
             },
             "artifact_id": {

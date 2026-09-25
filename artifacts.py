@@ -24,15 +24,32 @@ from typing import Any, Dict, Optional
 #: ``file`` est le seul qui ne se RENDE pas : n'importe quel fichier deja ecrit
 #: dans le coffre (PDF, tableur, archive...), publie pour etre TELECHARGE depuis
 #: le fil (PDF et images s'apercoivent aussi dans le panneau, decision cote app).
-#: Il exige donc ``path=`` — voir ``publish_artifact``. Jumeau de
-#: ``ARTIFACT_KINDS`` dans shared/artifacts.ts : sans cette valeur ici, un agent
-#: qui publie un PDF se fait refuser par SON PROPRE plugin (ValueError), et
-#: l'app ne voit jamais passer la demande.
-ARTIFACT_KINDS = ("mermaid", "markdown", "svg", "html", "drawio", "file")
+#: Il exige donc ``path=`` — voir ``publish_artifact``.
+#: ``motion`` est un FILM : une page HTML dont CHAQUE IMAGE est une fonction
+#: pure de ``t``, exposant ``window.__duration`` (secondes) et
+#: ``window.__renderAt(t)`` — polices integrees en ``data:``, aucune ressource
+#: distante, <= 2 Mo (``MAX_MOTION_CONTENT_LENGTH``). Il se rend comme ``html``
+#: (meme route sandboxee), mais un film jusqu'a 2 Mo ne passe pas par
+#: ``content`` (plafonne a ``MAX_ARTIFACT_CONTENT_LENGTH`` = 400 000) : il
+#: s'ecrit d'abord au coffre avec ``pulse_vault_write``, puis se publie par
+#: ``path``, comme ``file``.
+#: Jumeau de ``ARTIFACT_KINDS`` dans shared/artifacts.ts : sans une valeur ici,
+#: un agent qui publie ce type se fait refuser par SON PROPRE plugin
+#: (ValueError), et l'app ne voit jamais passer la demande.
+ARTIFACT_KINDS = ("mermaid", "markdown", "svg", "html", "drawio", "file", "motion")
 
 #: Bornes miroir de shared/artifacts.ts.
 MAX_ARTIFACT_CONTENT_LENGTH = 400_000
 MAX_ARTIFACT_TITLE_LENGTH = 120
+
+#: Plafond de taille d'un FILM (kind="motion"), miroir de shared/artifacts.ts.
+#: Distinct de ``MAX_ARTIFACT_CONTENT_LENGTH`` : celui-ci borne le contenu
+#: TEXTE inline (``content``, 400 000 caracteres pour tous les types), la ou
+#: un film jusqu'a 2 Mo ne peut de toute facon pas y passer — il s'ecrit au
+#: coffre puis se publie par ``path``. Non applique ici : le controle reel vit
+#: cote app (ecriture du coffre) ; cette constante ne fait que documenter la
+#: borne pour le modele et les tests miroir.
+MAX_MOTION_CONTENT_LENGTH = 2_000_000
 
 
 def is_artifact_kind(value: Any) -> bool:
@@ -114,6 +131,7 @@ ARTIFACT_EXTENSIONS = {
     "svg": "svg",
     "html": "html",
     "drawio": "drawio",
+    "motion": "html",
 }
 
 
