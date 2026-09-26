@@ -292,3 +292,68 @@ class TestNoteVocaleEntrante:
         )
 
         assert event.message_type == adapter_module.MessageType.TEXT
+
+
+class TestAutoTtsSeulementSurVoix:
+    """Hermes >= v2026.9.24 : ``voice.auto_tts: true`` doublait chaque reponse
+    ECRITE d'une note vocale. La sonde de l'adaptateur borne l'auto-TTS aux
+    tours VOICE (l'appel), et laisse la regle d'Hermes decider du reste."""
+
+    @pytest.fixture(autouse=True)
+    def _base_auto_tts(self, monkeypatch):
+        # La base d'Hermes (stubee ici) repond « oui » : c'est le cas des bots,
+        # tous en ``voice.auto_tts: true``.
+        base = adapter_module.PulseChatAdapter.__mro__[1]
+        monkeypatch.setattr(
+            base, "_should_auto_tts_for_chat", lambda self, chat_id: True, raising=False
+        )
+
+    def test_message_tape_ne_declenche_pas_l_auto_tts(self):
+        adapter = _make_adapter()
+        adapter._download_media = _fake_download([], [])
+        _handle(adapter, {"id": "t1", "text": "bonjour", "mediaUrls": []})
+
+        assert adapter._should_auto_tts_for_chat("demo") is False
+
+    def test_tour_d_appel_voice_garde_l_auto_tts(self):
+        adapter = _make_adapter()
+        adapter._download_media = _fake_download([], [])
+        _handle(adapter, {"id": "t2", "text": "tu m'entends ?", "messageType": "voice"})
+
+        assert adapter._should_auto_tts_for_chat("demo") is True
+
+    def test_la_base_garde_le_dernier_mot_sur_un_tour_voice(self, monkeypatch):
+        # `/voice off` ou `voice.auto_tts: false` : la sonde n'ELARGIT jamais.
+        base = adapter_module.PulseChatAdapter.__mro__[1]
+        monkeypatch.setattr(base, "_should_auto_tts_for_chat", lambda self, chat_id: False)
+        adapter = _make_adapter()
+        adapter._download_media = _fake_download([], [])
+        _handle(adapter, {"id": "t3", "text": "allo", "messageType": "voice"})
+
+        assert adapter._should_auto_tts_for_chat("demo") is False
+
+    def test_un_message_tape_apres_un_tour_voice_revient_a_l_ecrit(self):
+        adapter = _make_adapter()
+        adapter._download_media = _fake_download([], [])
+        _handle(adapter, {"id": "t4", "text": "allo", "messageType": "voice"})
+        _handle(adapter, {"id": "t5", "text": "et par ecrit ?"})
+
+        assert adapter._should_auto_tts_for_chat("demo") is False
+
+    def test_canal_jamais_vu_ne_parle_pas(self):
+        adapter = _make_adapter()
+
+        assert adapter._should_auto_tts_for_chat("inconnu") is False
+
+    def test_chaque_canal_a_son_propre_etat(self):
+        adapter = _make_adapter()
+        adapter._download_media = _fake_download([], [])
+        _handle(adapter, {"id": "t6", "text": "allo", "messageType": "voice"})
+        _handle(
+            adapter,
+            {"id": "t7", "text": "ecrit"},
+            channel={"slug": "autre", "name": "Autre"},
+        )
+
+        assert adapter._should_auto_tts_for_chat("demo") is True
+        assert adapter._should_auto_tts_for_chat("autre") is False

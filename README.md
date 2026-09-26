@@ -498,6 +498,13 @@ stt:
   language: fr
 ```
 
+**Hermes ≥ v2026.9.24 : plugin ≥ 1.15.1 obligatoire.** Depuis cette version,
+Hermes applique `voice.auto_tts: true` à **tout** message, tapé compris : chaque
+réponse écrite partait doublée d'une note vocale (postée juste avant le texte,
+sans légende). Le plugin 1.15.1 borne l'auto-TTS aux tours `voice` — c'est-à-dire
+à l'appel — via `_should_auto_tts_for_chat`. Ne pas passer `auto_tts` à `false`
+à la place : c'est ce réglage qui donne sa voix à l'agent pendant un appel.
+
 Le toolset `tts` doit être actif pour que l'agent puisse aussi parler de sa
 propre initiative (`text_to_speech`) ; l'auto-TTS, lui, n'en dépend pas.
 Le SDK `mistralai==2.4.8` est installé à la demande par Hermes : dans un
