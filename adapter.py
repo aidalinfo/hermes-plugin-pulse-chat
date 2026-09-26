@@ -448,6 +448,10 @@ class PulseChatAdapter(BasePlatformAdapter):
         # partir sans lui priverait l'agent de son ton, de ses consignes et
         # surtout de ``disabledTools`` — des outils que l'admin a retires.
         self._last_agent_config: Dict[str, Optional[Dict[str, Any]]] = {}
+        # Type du DERNIER message entrant par canal (True = VOICE). Lu par
+        # `_should_auto_tts_for_chat` : l'auto-TTS d'Hermes ne doit parler QUE
+        # quand l'humain a parle (cf. la methode).
+        self._last_inbound_voice: Dict[str, bool] = {}
         # Capacite audio annoncee par l'app au `hello.ack` (None = pas de flux).
         self._audio_capability: Optional[Dict[str, Any]] = None
         # Flux audio ouverts, par streamId — bornes pour ne jamais fuir si une
@@ -910,6 +914,7 @@ class PulseChatAdapter(BasePlatformAdapter):
 
         self._last_source[slug] = source
         self._last_agent_config[slug] = agent_config_metadata(data)
+        self._last_inbound_voice[slug] = is_voice
         await self.handle_message(event)
         self._remember_message_id(dedup_key)
         await self._send_ack(message_id)
@@ -1050,6 +1055,31 @@ class PulseChatAdapter(BasePlatformAdapter):
         return await self._post_agent_message(payload, str(message_id))
 
     # ── Notes vocales (l'agent parle) ─────────────────────────────────────
+
+    def _should_auto_tts_for_chat(self, chat_id: str) -> bool:
+        """L'auto-TTS d'Hermes ne parle QUE si le dernier message entrant du canal
+        etait VOICE — c'est-a-dire pendant un APPEL (un tour d'appel part en
+        ``messageType: voice``).
+
+        Depuis Hermes v2026.9.24 (``_adapter_for_source`` remplace par
+        ``_delivery_adapter_for`` dans ``gateway/run_voice.py``), la reponse
+        vocale du runner trouve enfin cet adaptateur, et ``voice.auto_tts: true``
+        s'applique a TOUT message — tape compris : chaque reponse ecrite partait
+        doublee d'une note vocale (sans legende, postee juste avant le texte).
+        Avant, la sonde echouait et rendait ``False`` sans bruit, si bien que le
+        reglage ne jouait qu'a l'appel.
+
+        La note vocale HUMAINE n'est pas concernee : l'app l'envoie en ``text``
+        et synthetise elle-meme la reponse (boucle vocale cote app). Un
+        ``/voice on`` explicite reste souverain cote runner (``voice_mode ==
+        "all"`` ne passe pas par cette sonde). Ne PAS passer ``voice.auto_tts``
+        a ``false`` sur les bots a la place : c'est ce reglage qui donne sa
+        voix a l'agent pendant un appel.
+        """
+        if not self._last_inbound_voice.get(str(chat_id), False):
+            return False
+        base = getattr(super(), "_should_auto_tts_for_chat", None)
+        return bool(base(chat_id)) if callable(base) else False
 
     async def send_voice(
         self,
@@ -2181,6 +2211,7 @@ class PulseChatAdapter(BasePlatformAdapter):
             reply["decision"],
             reply["requestId"],
         )
+        self._last_inbound_voice[slug] = False
         await self.handle_message(event)
 
     async def _handle_browser_control(self, data: Dict[str, Any]) -> None:
@@ -2227,6 +2258,7 @@ class PulseChatAdapter(BasePlatformAdapter):
             notice["sessionId"],
             slug,
         )
+        self._last_inbound_voice[slug] = False
         await self.handle_message(event)
 
     async def _post_agent_message(
