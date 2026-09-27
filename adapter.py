@@ -27,6 +27,11 @@ Configuration (env > config.extra) :
                                 hello (defaut: nom du premier profil)
     PULSE_CHAT_CHANNELS         optionnel — slugs autorises, separes par des virgules
     PULSE_CHAT_ALLOW_ALL_USERS  optionnel — true (l'app filtre deja via ChannelMember)
+    PULSE_CHAT_ALLOW_INSECURE   optionnel — 1 pour accepter http/ws en clair vers un
+                                hote NON local (refuse par defaut, cf. netguard.py)
+    PULSE_CHAT_MEDIA_HOSTS      optionnel — hotes supplementaires d'ou les medias
+                                (images) peuvent etre telecharges, separes par des
+                                virgules (defaut: seul l'hote de PULSE_CHAT_URL)
 """
 
 from __future__ import annotations
@@ -137,6 +142,19 @@ from .todos import (
     todo_message_id,
 )
 from .reconnect import is_retryable_ws_error, reconnect_delay
+from .netguard import (
+    ALLOW_INSECURE_ENV,
+    MEDIA_HOSTS_ENV,
+    allow_insecure_from_config,
+    InsecureTransportError,
+    build_guarded_opener,
+    host_of,
+    is_local_host,
+    media_url_refusal,
+    parse_hosts,
+    redact_url,
+    transport_allowed,
+)
 
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -200,6 +218,16 @@ _MAX_GATEWAY_APPROVALS = 100
 _MAX_CLARIFY_CARDS = 100
 
 _HTTP_TIMEOUT = 15.0
+
+# Ouvreur UNIQUE de tous les appels HTTP du plugin : HTTP(S) seuls (pas de
+# ``file://`` ni ``ftp://``), redirections bornees a l'origine (urllib recopie
+# ``Authorization`` sur la requete redirigee), clair borne aux hotes locaux.
+_OPENER = build_guarded_opener()
+
+
+def _urlopen(request, timeout=None):
+    """Point de passage de toute requete sortante — cf. ``netguard``."""
+    return _OPENER.open(request, timeout=timeout)
 _WS_CONNECT_TIMEOUT = 30.0
 _WS_MAX_SIZE = 10 * 1024 * 1024
 _MEDIA_MAX_BYTES = 20 * 1024 * 1024
@@ -307,6 +335,29 @@ def _warn_once(key: str, message: str) -> None:
     logger.warning("%s", message)
 
 
+def _warn_insecure_base_url(base_url: str) -> None:
+    """Avertit (une fois) quand l'app est jointe en clair — accepte ou refuse."""
+    if not base_url or not base_url.lower().startswith("http://"):
+        return
+    if not transport_allowed(base_url):
+        logger.error(
+            "Pulse Chat: PULSE_CHAT_URL en clair (%s) vers un hote non local — "
+            "connexion et appels HTTP REFUSES (le jeton partirait sans chiffrement). "
+            "Passer en https, ou poser %s=1.",
+            redact_url(base_url),
+            ALLOW_INSECURE_ENV,
+        )
+        return
+    reason = (
+        "hote local" if is_local_host(host_of(base_url)) else f"{ALLOW_INSECURE_ENV}=1"
+    )
+    _warn_once(
+        "insecure_base_url",
+        f"Pulse Chat: PULSE_CHAT_URL en clair ({redact_url(base_url)}) — accepte ({reason}). "
+        "Le jeton et les messages circulent sans chiffrement.",
+    )
+
+
 def agent_config_metadata(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Bloc ``agentConfig`` de la frame, repris TEL QUEL (fonction pure).
 
@@ -381,11 +432,26 @@ def _ws_url(base_url: str) -> str:
 
     Le token de service passe par le header ``Authorization: Bearer …`` —
     jamais en query string (les URLs finissent dans les logs de proxies).
+
+    Le clair (``ws://``, depuis une URL ``http``) n'est accepte que vers un hote
+    LOCAL ou derriere ``PULSE_CHAT_ALLOW_INSECURE=1`` : le WebSocket porte le
+    secret d'agent (ou le jeton de service) et TOUS les messages du client.
+    Leve ``InsecureTransportError`` sinon, ``ValueError`` sur un autre schema.
     """
     parts = urllib.parse.urlsplit(base_url)
-    scheme = "wss" if parts.scheme == "https" else "ws"
+    scheme_in = parts.scheme.lower()
+    if scheme_in not in ("http", "https"):
+        raise ValueError(f"PULSE_CHAT_URL doit etre en http(s), pas {scheme_in or '(vide)'}")
+    scheme = "wss" if scheme_in == "https" else "ws"
     path = parts.path.rstrip("/")
-    return f"{scheme}://{parts.netloc}{path}/ws/hermes"
+    url = f"{scheme}://{parts.netloc}{path}/ws/hermes"
+    if not transport_allowed(url):
+        raise InsecureTransportError(
+            f"PULSE_CHAT_URL en clair ({redact_url(base_url)}) vers un hote non local : "
+            f"le jeton partirait sans chiffrement. Passer en https, ou poser "
+            f"{ALLOW_INSECURE_ENV}=1 pour l'accepter explicitement."
+        )
+    return url
 
 
 class PulseChatAdapter(BasePlatformAdapter):
@@ -420,6 +486,23 @@ class PulseChatAdapter(BasePlatformAdapter):
                 "Pulse Chat: PULSE_CHAT_AGENT_TOKEN absent — identite auto-declaree "
                 "(regime `declared`). Les connecteurs tiers seront refuses."
             )
+
+        # Hotes d'ou un media peut etre telecharge. Par defaut, celui de l'app
+        # SEULEMENT : le serveur envoie des liens signes sur son domaine public
+        # (`/api/attachments/:id/download`, relais du contenu, sans redirection).
+        # Si PULSE_CHAT_URL est une adresse INTERNE distincte de ce domaine, le
+        # domaine public doit etre ajoute ici — sinon les images sont refusees
+        # (avec un avertissement qui nomme la variable).
+        self.media_hosts = parse_hosts(
+            _get_secret(MEDIA_HOSTS_ENV) or extra.get("media_hosts", "")
+        )
+        base_host = host_of(self.base_url)
+        if base_host:
+            self.media_hosts.add(base_host)
+        allow_insecure_from_config(
+            _get_secret(ALLOW_INSECURE_ENV) or extra.get("allow_insecure", "")
+        )
+        _warn_insecure_base_url(self.base_url)
 
         # Profils Hermes servis par ce bot + identite annoncee (frame hello).
         self.profiles: List[str] = parse_profiles(
@@ -614,6 +697,16 @@ class PulseChatAdapter(BasePlatformAdapter):
             )
             return False
 
+        # Transport verifie AVANT tout le reste : une erreur de configuration
+        # de securite prime sur une dependance manquante.
+        try:
+            url = _ws_url(self.base_url)
+        except (InsecureTransportError, ValueError) as exc:
+            logger.error("Pulse Chat: connexion refusee — %s", exc)
+            self._last_connect_retryable = False
+            self._set_fatal_error("insecure_transport", str(exc), retryable=False)
+            return False
+
         try:
             import websockets
         except ImportError:
@@ -625,7 +718,6 @@ class PulseChatAdapter(BasePlatformAdapter):
             )
             return False
 
-        url = _ws_url(self.base_url)
         # Secret PAR AGENT si disponible, sinon jeton de service. Le serveur
         # distingue les deux au prefixe (`pca_`) et emet une session `verified`
         # dans le premier cas, `declared` dans le second. L'en-tete HTTP, lui,
@@ -646,7 +738,7 @@ class PulseChatAdapter(BasePlatformAdapter):
             self._ws = await asyncio.wait_for(connection, timeout=_WS_CONNECT_TIMEOUT)
         except Exception as exc:
             retryable = is_retryable_ws_error(exc)
-            logger.error("Pulse Chat: echec de connexion WS a %s — %s", self.base_url, exc)
+            logger.error("Pulse Chat: echec de connexion WS a %s — %s", redact_url(self.base_url), exc)
             self._last_connect_retryable = retryable
             self._set_fatal_error("connect_failed", str(exc), retryable=retryable)
             return False
@@ -969,10 +1061,23 @@ class PulseChatAdapter(BasePlatformAdapter):
         return paths, types
 
     def _download_one(self, url: str) -> Tuple[Optional[str], Optional[str]]:
+        # L'URL vient du serveur, mais rien ne garantit qu'elle designe l'app :
+        # schema, hote et transport sont verifies AVANT tout acces reseau.
+        # Refus journalise SANS la query — un lien signe y porte sa signature.
+        refusal_reason = media_url_refusal(url, self.media_hosts)
+        if refusal_reason:
+            logger.warning(
+                "Pulse Chat: media refuse (%s) — %s. Si l'app sert ses liens sur un "
+                "autre domaine que PULSE_CHAT_URL, l'ajouter a %s.",
+                refusal_reason,
+                redact_url(url),
+                MEDIA_HOSTS_ENV,
+            )
+            return None, None
         request = urllib.request.Request(
             url, headers={"User-Agent": "hermes-pulse-chat-plugin"}
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _urlopen(request, timeout=30) as response:
             mime = response.headers.get_content_type() or ""
             audio = is_audio_mime(mime)
             if not mime.startswith("image/") and not audio:
@@ -984,7 +1089,9 @@ class PulseChatAdapter(BasePlatformAdapter):
             data = response.read(cap + 1)
             if len(data) > cap:
                 logger.warning(
-                    "Pulse Chat: media trop volumineux ignore (%s, %s)", mime, url
+                    "Pulse Chat: media trop volumineux ignore (%s, %s)",
+                    mime,
+                    redact_url(url),
                 )
                 return None, None
         if self._media_dir is None:
@@ -1186,7 +1293,7 @@ class PulseChatAdapter(BasePlatformAdapter):
         request = urllib.request.Request(
             url, data=body, headers=self._auth_headers(headers), method="POST"
         )
-        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT) as response:
+        with _urlopen(request, timeout=_HTTP_TIMEOUT) as response:
             return int(response.status), response.read()
 
     # ── Audio en flux : l'agent parle pendant qu'il redige ────────────────
@@ -1477,11 +1584,11 @@ class PulseChatAdapter(BasePlatformAdapter):
         )
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT) as response:
+            with _urlopen(request, timeout=_HTTP_TIMEOUT) as response:
                 return response.read()
         except urllib.error.HTTPError as exc:
             logger.warning(
-                "Pulse Chat: coffre %s %s -> HTTP %s", method, url, exc.code
+                "Pulse Chat: coffre %s %s -> HTTP %s", method, redact_url(url), exc.code
             )
         except Exception as exc:
             logger.warning("Pulse Chat: coffre %s en echec — %s", method, exc)
@@ -1513,7 +1620,7 @@ class PulseChatAdapter(BasePlatformAdapter):
             url, data=body, headers=self._auth_headers(headers), method=method
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with _urlopen(request, timeout=timeout) as response:
                 raw = response.read()
                 status = int(response.status)
         except urllib.error.HTTPError as exc:
@@ -1522,9 +1629,9 @@ class PulseChatAdapter(BasePlatformAdapter):
                 raw = exc.read()
             except Exception:
                 raw = b""
-            logger.warning("Pulse Chat: %s %s -> HTTP %s", method, url, status)
+            logger.warning("Pulse Chat: %s %s -> HTTP %s", method, redact_url(url), status)
         except Exception as exc:
-            logger.warning("Pulse Chat: %s %s en echec — %s", method, url, exc)
+            logger.warning("Pulse Chat: %s %s en echec — %s", method, redact_url(url), exc)
             return 0, {"message": str(exc)}
         try:
             parsed = json.loads(raw.decode("utf-8")) if raw else None
@@ -1683,7 +1790,7 @@ class PulseChatAdapter(BasePlatformAdapter):
         headers = self._auth_headers({"Content-Type": "application/json"})
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT) as response:
+            with _urlopen(request, timeout=_HTTP_TIMEOUT) as response:
                 raw = response.read()
             parsed = json.loads(raw.decode("utf-8")) if raw else {}
             return {"ok": True, **(parsed if isinstance(parsed, dict) else {"data": parsed})}
@@ -2327,7 +2434,7 @@ class PulseChatAdapter(BasePlatformAdapter):
             headers=self._auth_headers({"Content-Type": "application/json"}),
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT) as response:
+        with _urlopen(request, timeout=_HTTP_TIMEOUT) as response:
             response.read()
             return int(response.status)
 

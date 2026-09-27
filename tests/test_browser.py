@@ -798,7 +798,7 @@ def test_le_transport_porte_bearer_et_session(monkeypatch):
         requests.append((request, timeout))
         return _FakeResponse({"sessionId": "s1", "cdpUrl": "wss://x/ws/browser-cdp/j"})
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(adapter_module, "_urlopen", fake_urlopen)
 
     status, body = adapter_module._browser_http("POST", SESSIONS, {"channel": "demo"}, 60.0)
 
