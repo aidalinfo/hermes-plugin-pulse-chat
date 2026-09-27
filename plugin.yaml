@@ -1,7 +1,7 @@
 name: pulse-chat
 label: Pulse Chat
 kind: platform
-version: 1.15.1
+version: 1.15.2
 description: >
   Adaptateur de plateforme Pulse Chat pour Hermes Agent.
   Relaie les messages entre l'app Pulse Chat (front de conversation client)
@@ -53,4 +53,18 @@ optional_env:
   - name: PULSE_CHAT_ALLOW_ALL_USERS
     description: "Accepter tous les utilisateurs (true — l'app filtre deja via ChannelMember)"
     prompt: "Autoriser tous les utilisateurs ? (true/false)"
+    password: false
+  - name: PULSE_CHAT_MEDIA_HOSTS
+    description: >
+      Hotes supplementaires d'ou les images peuvent etre telechargees, separes
+      par des virgules (defaut: l'hote de PULSE_CHAT_URL seul). A poser quand
+      PULSE_CHAT_URL est une adresse interne et que les liens de pieces jointes
+      portent le domaine public de l'app.
+    prompt: "Hotes des medias (separes par des virgules — ou vide)"
+    password: false
+  - name: PULSE_CHAT_ALLOW_INSECURE
+    description: >
+      1 pour accepter http/ws EN CLAIR vers un hote public (refuse par defaut :
+      le jeton partirait sans chiffrement). Inutile vers un hote local.
+    prompt: "Autoriser le clair vers un hote public ? (1/vide)"
     password: false

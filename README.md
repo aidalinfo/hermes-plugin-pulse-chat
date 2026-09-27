@@ -12,6 +12,7 @@ hermes-plugin/pulse-chat/
 ├── classification.py   # classification pure message/tool_event (0 dépendance hermes)
 ├── hello.py            # frame hello multi-profils pure (0 dépendance hermes)
 ├── browser.py          # fournisseur de navigateur `pulse` + pulse_browser_handoff
+├── netguard.py         # garde-fous réseau : schémas, redirections, clair, journaux
 └── tests/              # pytest (sans hermes installé)
 ```
 
@@ -459,6 +460,19 @@ hermes plugins enable pulse-chat
 | `PULSE_CHAT_AGENT_NAME` | non | Nom d'affichage envoyé dans la frame hello (défaut : nom du premier profil) |
 | `PULSE_CHAT_CHANNELS` | non | Slugs autorisés séparés par des virgules (vide = tous) |
 | `PULSE_CHAT_ALLOW_ALL_USERS` | non | Mettre `true` : l'accès est déjà filtré côté app via `ChannelMember` (ne pas dupliquer la règle) |
+| `PULSE_CHAT_MEDIA_HOSTS` | non | Hôtes supplémentaires d'où les images peuvent être téléchargées, séparés par des virgules. Défaut : l'hôte de `PULSE_CHAT_URL` seul. **À poser** si le bot joint l'app par une adresse interne (`http://pulse-chat:3000`) alors que les liens de pièces jointes portent le domaine public (`AUTH_BASE_URL`, ex. `chat.pulsemyit.fr`) |
+| `PULSE_CHAT_ALLOW_INSECURE` | non | `1` pour accepter `http`/`ws` en clair vers un hôte **public**. Sans lui, le clair n'est accepté que vers un hôte local (loopback, IP privée, nom de service Docker sans point, `.local`/`.internal`/`.lan`/`.test`/`.localhost`) |
+
+**Garde-fous réseau (1.15.2).** Toute requête du plugin passe par un ouvreur
+HTTP(S) seul (`netguard.py`) : ni `file://` ni `ftp://`, aucune redirection
+hors de l'origine demandée (urllib recopierait sinon `Authorization` vers le
+nouvel hôte), clair refusé vers un hôte public — la connexion WebSocket échoue
+alors avec `insecure_transport`, sans rejeu. Les médias ne sont suivis que vers
+l'hôte de l'app (ou `PULSE_CHAT_MEDIA_HOSTS`), et les journaux n'impriment
+jamais la query d'une URL (la signature d'un lien de téléchargement y vit).
+`pulse_vault_write` refuse de déposer un fichier de secrets évident (`.env*`,
+`auth.json`, `.netrc`, `~/.ssh`, `~/.aws`, `/proc`…) : le coffre est
+téléchargeable par tous les membres du canal.
 
 ### `~/.hermes/config.yaml`
 
