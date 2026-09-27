@@ -116,6 +116,37 @@ class TestPartiePure:
             workspace.resolve_local_file(str(tmp_path))
         assert err.value.code == "local_file_invalid"
 
+    @pytest.mark.parametrize(
+        "relative",
+        [".env", ".env.production", ".ssh/id_ed25519", ".aws/credentials", "hermes/auth.json", ".netrc"],
+    )
+    def test_un_fichier_de_secrets_nest_jamais_depose(self, tmp_path, relative):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("PULSE_CHAT_TOKEN=secret")
+        with pytest.raises(workspace.WorkspaceToolError) as err:
+            workspace.resolve_local_file(str(target))
+        assert err.value.code == "local_file_forbidden"
+
+    def test_un_lien_vers_un_secret_est_refuse(self, tmp_path):
+        secret = tmp_path / ".env"
+        secret.write_text("x")
+        link = tmp_path / "rapport.txt"
+        link.symlink_to(secret)
+        with pytest.raises(workspace.WorkspaceToolError) as err:
+            workspace.resolve_local_file(str(link))
+        assert err.value.code == "local_file_forbidden"
+
+    def test_les_pseudo_fichiers_systeme_sont_refuses(self):
+        with pytest.raises(workspace.WorkspaceToolError) as err:
+            workspace.resolve_local_file("/proc/self/environ")
+        assert err.value.code == "local_file_forbidden"
+
+    def test_un_fichier_ordinaire_passe(self, tmp_path):
+        ok = tmp_path / "devis-env.pdf"
+        ok.write_bytes(b"%PDF")
+        assert workspace.resolve_local_file(str(ok)) == (str(ok.resolve()), 4)
+
     def test_le_plafond_est_verifie_AVANT_lenvoi(self, tmp_path, monkeypatch):
         big = tmp_path / "gros.bin"
         big.write_bytes(b"x" * 11)

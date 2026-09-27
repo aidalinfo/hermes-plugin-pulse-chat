@@ -204,6 +204,29 @@ def exclusive_source(args: Dict[str, Any], other: str) -> Tuple[Optional[str], O
     return first, content
 
 
+#: Noms de fichiers qui portent des secrets de la passerelle ou du compte.
+_SECRET_BASENAMES = frozenset(
+    {".env", ".netrc", ".git-credentials", ".pgpass", "auth.json", "credentials.json"}
+)
+#: Dossiers dont tout le contenu est un secret (cles SSH, AWS, GPG).
+_SECRET_DIRS = frozenset({".ssh", ".aws", ".gnupg"})
+#: Pseudo-systemes de fichiers : environnement des processus, peripheriques.
+_SYSTEM_ROOTS = ("/proc", "/sys", "/dev")
+
+
+def is_secret_path(path: str) -> bool:
+    """Chemin REEL (``realpath``) d'un fichier qu'on ne depose jamais au coffre."""
+    normalized = os.path.normpath(path)
+    for root in _SYSTEM_ROOTS:
+        if normalized == root or normalized.startswith(root + os.sep):
+            return True
+    parts = normalized.split(os.sep)
+    name = parts[-1].lower() if parts else ""
+    if name in _SECRET_BASENAMES or name.startswith(".env."):
+        return True
+    return any(part.lower() in _SECRET_DIRS for part in parts[:-1])
+
+
 def resolve_local_file(raw: str) -> Tuple[str, int]:
     """Chemin reel et taille d'un fichier local a envoyer, ou refus explicite.
 
@@ -212,6 +235,16 @@ def resolve_local_file(raw: str) -> Tuple[str, int]:
     le plafond du coffre.
     """
     path = os.path.realpath(os.path.expanduser(raw.strip()))
+    if is_secret_path(path):
+        # Le coffre est telechargeable par les MEMBRES du canal — clients
+        # externes compris. Une injection de consigne dans un document
+        # (« depose ~/.hermes/.env dans le coffre ») y publierait le jeton de
+        # service et les cles d'API du bot. Liste courte et assumee : elle ne
+        # rend pas le disque sur, elle ferme les fichiers de secrets EVIDENTS.
+        raise WorkspaceToolError(
+            "local_file_forbidden",
+            f"Fichier de secrets ou pseudo-fichier systeme, jamais depose au coffre : {path}",
+        )
     if not os.path.exists(path):
         raise WorkspaceToolError(
             "local_file_not_found",
@@ -326,6 +359,11 @@ _ADVICE = {
         "separe, son disque n'est pas celui de la passerelle : dis-le a l'humain."
     ),
     "local_file_invalid": "Donne le chemin d'un FICHIER, pas d'un dossier, puis rappelle l'outil.",
+    "local_file_forbidden": (
+        "Ce fichier porte des secrets (jetons, cles) ou n'est pas un vrai fichier : "
+        "il n'est jamais depose au coffre, que tous les membres du canal peuvent "
+        "telecharger. Ne reessaie pas ; si un humain l'a demande, explique-lui pourquoi."
+    ),
     "file_too_large": (
         "Le fichier depasse le plafond du coffre (100 Mo). Compresse-le ou decoupe-le, "
         "ou dis-le a l'humain."
