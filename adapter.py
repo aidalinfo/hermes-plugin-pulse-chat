@@ -131,7 +131,7 @@ from .voice import (
     voice_filename,
     voice_url,
 )
-from .classification import classify_outbound, parse_tool  # noqa: F401  (re-export)
+from .classification import classify_outbound, parse_tool, split_recovered_reply  # noqa: F401  (re-export)
 from .hello import build_hello, parse_profiles
 from .metrics import extract_metrics
 from .todos import (
@@ -1115,11 +1115,16 @@ class PulseChatAdapter(BasePlatformAdapter):
         content = content if content is not None else ""
         kind = classify_outbound(content, is_edit=False)
         info = parse_tool(content)
+        # Reponse REEXPEDIEE par Hermes (« ♻️ Recovered reply … : ») : la bulle
+        # porte le CORPS, le marqueur ne vit que dans ``raw``. Sans cela, la
+        # classification ayant deja lu le corps, un message partirait bien en
+        # ``message`` mais s'afficherait precede d'un avertissement technique.
+        shown = split_recovered_reply(content)[1] if kind == "message" else content
         hermes_id = uuid.uuid4().hex
         payload = {
             "channelSlug": str(chat_id),
             "kind": kind,
-            "content": content,
+            "content": shown,
             "raw": content,
             "hermesMessageId": hermes_id,
             "tool": info["tool"] if kind == "tool_event" else None,

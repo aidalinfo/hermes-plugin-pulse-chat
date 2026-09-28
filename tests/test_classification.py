@@ -18,6 +18,7 @@ _spec.loader.exec_module(classification)
 
 classify_outbound = classification.classify_outbound
 parse_tool = classification.parse_tool
+split_recovered_reply = classification.split_recovered_reply
 
 
 # ── Famille 1 : reponses normales -> message ─────────────────────────────
@@ -204,3 +205,58 @@ CODE_RESPONSES = [
 @pytest.mark.parametrize("content", CODE_RESPONSES)
 def test_code_response_is_not_bare_terminal(content):
     assert classify_outbound(content, is_edit=False) == "message"
+
+
+# ── Réponse RÉEXPÉDIÉE par Hermes (« ♻️ Recovered reply … : ») ────────────
+#
+# Le registre de livraison d'Hermes (``gateway/delivery_ledger.py``) préfixe une
+# réponse RÉEXPÉDIÉE après un échec de livraison par un marqueur ♻️, suivi d'une
+# ligne vide puis de la réponse ENTIÈRE. ``♻️`` étant un préfixe d'interim, toute
+# la réponse partait en activité d'outil. Ce qui se classe est le CORPS.
+
+RECOVERED_MARKERS = [
+    "♻️ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n\n",
+    "♻️ Recovered reply — the messaging platform reconnected after the original "
+    "delivery failed, so this may be a duplicate:\n\n",
+    "♻️ Recovered reply — the messaging platform's rate limit refused the original, so part of "
+    "it may already have arrived above:\n\n",
+    # Variante sans variation selector.
+    "♻ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n\n",
+]
+
+BODY = "@Maxime — **authentification retirée**.\n\nLa maquette est désormais accessible."
+
+
+@pytest.mark.parametrize("marker", RECOVERED_MARKERS)
+def test_recovered_reply_is_a_message(marker):
+    content = marker + BODY
+    assert classify_outbound(content, is_edit=False) == "message"
+    assert parse_tool(content) == {"tool": None, "phase": None}
+    assert split_recovered_reply(content) == (marker.rstrip("\n"), BODY)
+
+
+def test_recovered_reply_keeps_classifying_its_body():
+    # Une réponse réexpédiée qui était elle-même un tool progress le reste.
+    content = RECOVERED_MARKERS[0] + "\U0001f50d web_search: \"pulse\""
+    assert classify_outbound(content, is_edit=False) == "tool_event"
+    assert parse_tool(content) == {"tool": "web_search", "phase": "progress"}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        # Le marqueur SEUL, sans corps : interim, comme avant.
+        "♻️ Recovered reply — the gateway restarted mid-turn.",
+        RECOVERED_MARKERS[0],
+        RECOVERED_MARKERS[0] + "   \n",
+        "♻️ Gateway online",
+    ],
+)
+def test_recovered_marker_without_body_stays_interim(content):
+    assert split_recovered_reply(content) == (None, content)
+    assert parse_tool(content)["phase"] == "interim"
+
+
+def test_split_ignores_ordinary_text():
+    assert split_recovered_reply(BODY) == (None, BODY)
+    assert split_recovered_reply("") == (None, "")
