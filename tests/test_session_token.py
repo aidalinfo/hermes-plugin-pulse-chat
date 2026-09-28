@@ -65,7 +65,7 @@ def _capture_http(monkeypatch):
         requests.append(request)
         return _FakeResponse()
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(adapter_module, "_urlopen", fake_urlopen)
     return requests
 
 
@@ -197,7 +197,7 @@ def _fail_http(monkeypatch, status, reason="Conflict"):
     def fake_urlopen(request, timeout=None):
         raise urllib.error.HTTPError(request.full_url, status, reason, {}, None)
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(adapter_module, "_urlopen", fake_urlopen)
 
 
 def test_un_409_est_transitoire_et_rejouable(monkeypatch):
