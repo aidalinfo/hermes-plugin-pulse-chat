@@ -27,7 +27,7 @@ Regles (decision 3 du plan) :
 from __future__ import annotations
 
 import re
-from typing import Dict, Literal, Optional
+from typing import Dict, Literal, Optional, Tuple
 
 Kind = Literal["message", "tool_event"]
 
@@ -126,6 +126,32 @@ def _is_bare_terminal_bubble(content: str) -> bool:
     return saw_block
 
 
+# Marqueur d'une reponse REEXPEDIEE par le registre de livraison d'Hermes
+# (``gateway/delivery_ledger.py`` : RECOVERED_MARKER, RECONNECTED_MARKER,
+# FLOOD_MARKER) : « ♻️ Recovered reply — <cause> : », une ligne vide, puis la
+# reponse ENTIERE. ``♻️`` etant aussi le prefixe d'un interim (« ♻️ Gateway
+# online »), la reponse partait tout entiere en activite d'outil. Le motif exige
+# les deux-points ET la ligne vide : un marqueur sans corps reste un interim.
+_RECOVERED_REPLY_RE = re.compile(r"\A(\u267b\ufe0f?[ \t]*Recovered reply\b[^\n]*:)[ \t]*\n[ \t]*\n")
+
+
+def split_recovered_reply(content: str) -> Tuple[Optional[str], str]:
+    """Separe le marqueur ``♻️ Recovered reply … :`` de la reponse qu'il precede.
+
+    Rend ``(marqueur, corps)`` quand ``content`` est une reponse reexpediee dont
+    le corps n'est pas vide, sinon ``(None, content)`` tel quel. Le corps est ce
+    qui se CLASSE et ce qui s'affiche ; le contenu original reste dans ``raw``.
+    """
+    content = content or ""
+    match = _RECOVERED_REPLY_RE.match(content)
+    if not match:
+        return None, content
+    body = content[match.end():]
+    if not body.strip():
+        return None, content
+    return match.group(1), body
+
+
 def parse_tool(content: str) -> Dict[str, Optional[str]]:
     """Extrait ``{"tool": ..., "phase": ...}`` d'un contenu sortant.
 
@@ -134,9 +160,12 @@ def parse_tool(content: str) -> Dict[str, Optional[str]]:
     - motif ``^<emoji> <mot>`` -> ``{"tool": "<mot>", "phase": "progress"}``
     - sinon                    -> ``{"tool": None, "phase": None}`` (reponse normale)
 
+    Une reponse reexpediee (``♻️ Recovered reply … :``) se classe sur son
+    CORPS, jamais sur son marqueur (``split_recovered_reply``).
+
     Fonction pure, sans dependance gateway.
     """
-    content = content or ""
+    content = split_recovered_reply(content)[1]
 
     # 💻 terminal\n```...``` — tool progress avec code fence.
     if content.startswith(TERMINAL_PREFIX):

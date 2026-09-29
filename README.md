@@ -63,6 +63,11 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
 - **Classification** (`classification.py`, décision 3 du plan) :
   - `edit_message()` (tool progress accumulé) ⇒ **toujours** `tool_event`
     (upsert serveur par `hermesMessageId`) ;
+  - réponse **réexpédiée** par Hermes (« ♻️ Recovered reply — … : », ligne
+    vide, puis la réponse — registre de livraison, après un échec d'envoi) ⇒
+    classée sur son **corps**, qui est aussi ce que la bulle affiche ; le
+    marqueur ne reste que dans `raw` (1.15.3 — avant, toute la réponse partait
+    en `interim`, repliée sous « 1 activité d'outil ») ;
   - préfixe réservé en début de contenu (⚡ ⏳ ⏩ ↪ ♻️ ♻ 🔄 ✅ ❌ 💬 💻)
     ⇒ `tool_event` phase `interim` ;
   - motif tool-progress `^<emoji court> <mot>…`
