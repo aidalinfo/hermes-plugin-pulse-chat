@@ -115,6 +115,17 @@ class TestRelance:
         assert dispatched[0].message_id != dispatched[1].message_id
         assert dispatched[1].text.startswith("[Navigateur] La main t'a ete rendue d'office")
 
+    def test_bot_redemarre_la_source_porte_un_user_id(self):
+        """Sans ``_last_source`` (bot redemarre), une source a ``user_id=None``
+        est jetee en silence par Hermes : l'agent ne serait jamais relance."""
+        adapter, dispatched = _adapter()
+        assert adapter._last_source == {}
+        asyncio.run(adapter._handle_browser_control(_rendu("released", True)))
+        source = dispatched[0].source
+        assert source["user_id"] == adapter_module.FALLBACK_USER_ID
+        assert source["user_name"] == "Killian"
+        assert source["chat_type"] == "group"
+
     def test_la_derniere_source_du_canal_est_reprise(self):
         adapter, dispatched = _adapter()
         known = {"chat_id": "compta", "chat_name": "Compta", "user_name": "Killian", "known": True}

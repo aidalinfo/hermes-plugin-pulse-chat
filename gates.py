@@ -450,6 +450,10 @@ def parse_gate_reply(frame: Any) -> Optional[Dict[str, Any]]:
         "decision": decision,
         "comment": comment if isinstance(comment, str) and comment.strip() else None,
         "decidedBy": str(decided_by.get("userName") or ""),
+        # Identifiant du decideur : c'est lui que porte la source d'une decision
+        # TARDIVE (bot redemarre, aucune source memorisee). Vide si l'app n'en a
+        # plus (rejeu d'une demande dont le decideur a ete supprime).
+        "decidedById": str(decided_by.get("userId") or ""),
         "decidedAt": gate.get("decidedAt"),
         "channelSlug": str(channel.get("slug") or ""),
         "channelName": str(channel.get("name") or ""),
