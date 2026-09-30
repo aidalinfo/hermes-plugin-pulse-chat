@@ -31,6 +31,7 @@ tente pas d'actions vouées au refus, et sait nommer à l'humain ce qui lui manq
 | Écrire un fichier au coffre-fort (PDF, tableur, image, vidéo, texte…) | **outil du plugin** `pulse_vault_write` (`path` + `local_path`, ou `content` pour un texte). En secours, si cet outil n'est pas dans ta liste : **outils MCP** `channel_vault_write` (petit fichier) ou `channel_vault_upload_url` (gros fichier : tu fais le PUT toi-même) |
 | Montrer un fichier ou un document dans la conversation | **outil du plugin** `pulse_publish_artifact` — `kind: "file"` + `path` pour un fichier déjà écrit au coffre ; en secours, **outil MCP** `channel_artifact_publish`. Republier le même `artifact_id` crée une nouvelle version |
 | Montrer un film (animation générée) | **outil du plugin** `pulse_publish_artifact` — `kind: "motion"` + `path` pour une page HTML déjà écrite au coffre |
+| Faire un podcast, un résumé audio, quelque chose « à écouter » | **outil du plugin** `pulse_podcast` — titre + chapitres en prose parlée ; l'app synthétise et publie la carte elle-même (jamais `pulse_publish_artifact`) |
 | Faire valider ton plan ou ton livrable avant d'agir | **outil du plugin** `pulse_request_approval` (skill `pulse-chat:approvals`) |
 | Faire faire par un humain ce que la page du navigateur exige (connexion, captcha, code SMS) | **outil du plugin** `pulse_browser_handoff` — le navigateur doit déjà être ouvert |
 | Accord sur une commande jugée dangereuse | **Hermes**, son garde-fou — tu n'as rien à appeler |

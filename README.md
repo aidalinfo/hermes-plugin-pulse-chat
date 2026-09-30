@@ -12,6 +12,7 @@ hermes-plugin/pulse-chat/
 ├── classification.py   # classification pure message/tool_event (0 dépendance hermes)
 ├── hello.py            # frame hello multi-profils pure (0 dépendance hermes)
 ├── browser.py          # fournisseur de navigateur `pulse` + pulse_browser_handoff
+├── podcast.py          # pulse_podcast : payload, résultats et refus (pur)
 ├── netguard.py         # garde-fous réseau : schémas, redirections, clair, journaux
 └── tests/              # pytest (sans hermes installé)
 ```
@@ -299,6 +300,50 @@ path="artifacts/devis.pdf", title="Devis — V4", artifact_id="devis-client")`.
   fermer quelque chose.
 
 Aucune mise à jour de l'app n'est requise : les routes existent déjà.
+
+### Faire un podcast (`pulse_podcast`)
+
+Outil du plugin (≥ 1.16.0), **app ≥ 0.44.0 requise**. L'agent écrit un titre
+et des chapitres en prose parlée ; **l'app** fait tout le reste — synthèse
+(voix Voxtral de l'agent), dépôt au coffre, carte dans le fil (lecteur,
+chapitres, transcription). Le plugin reste mince : il transporte.
+
+```
+pulse_podcast(title, chapters: [{title, summary?, text}])   # outil, toolset "pulse_chat"
+    -> POST /api/agent/podcasts/<canal>  {title, chapters}
+    <- 202 {podcastId, status: "queued"}
+```
+
+- **Réponse immédiate `queued`.** La synthèse prend plusieurs minutes, au-delà
+  du plafond de 300 s qu'Hermes impose à un outil asynchrone : l'outil n'attend
+  pas, la carte apparaît d'elle-même. Consigne rendue au modèle : ne pas
+  recopier le texte en message, ne pas le lire à voix haute. Même titre ⇒
+  nouvelle version de la même carte.
+- **Aucune troncature, aucune borne appliquée par le plugin.** Les bornes
+  (titre ≤ 120, 1 à 20 chapitres, titre de chapitre ≤ 120, résumé ≤ 200,
+  total des `text` entre 200 et 15 000 caractères) sont **annoncées** dans le
+  schéma et la description, jamais appliquées par coupe : un podcast tronqué
+  ferait s'arrêter la voix au milieu d'une phrase. L'app refuse avec un code
+  nommé, la borne dans le message.
+- **Le canal n'est pas un paramètre**, comme pour les autres outils du plugin.
+- **Refus relayés tels quels** (`code`, `message`, conseil `next`) :
+  `voice_disabled` (422, voix de l'agent éteinte), `podcast_in_progress` (409),
+  `podcast_text_too_short` / `podcast_text_too_long` (400 / 413),
+  `podcast_synthesis_unavailable` (501 — rendu « synthèse indisponible sur
+  cette instance »), `channel_not_found` (404, ou app < 0.44.0 qui ne connaît
+  pas la route), `invalid_request` (400 de schéma, issues Zod résumées).
+- **`kind: "podcast"` existe côté artefacts mais ne se publie pas** : il est
+  hors de l'enum de `pulse_publish_artifact`, qui le refuse en nommant
+  `pulse_podcast` (`podcast_not_publishable`).
+
+**Diagnostic — « l'agent ne propose pas de podcast ».** L'outil n'existe que
+sur une image du plugin ≥ 1.16.0, et rien ne le signale ailleurs : vérifier la
+version réellement chargée (`hermes plugins list`, et `pulse_podcast` dans la
+liste des outils du bot), puis qu'**aucun dossier de sauvegarde du plugin**
+(ex. `pulse-chat.bak/`) ne traîne sous `/opt/data/plugins/` — Hermes peut le
+charger à la place de la nouvelle version. `platform_hint` est le seul texte
+qui fait connaître l'outil au modèle. Un refus `channel_not_found` sur un canal
+qui existe signale une app antérieure à 0.44.0.
 
 ### Navigateur des agents (fournisseur `pulse`, `pulse_browser_handoff`)
 
