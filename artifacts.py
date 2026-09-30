@@ -36,7 +36,17 @@ from typing import Any, Dict, Optional
 #: Jumeau de ``ARTIFACT_KINDS`` dans shared/artifacts.ts : sans une valeur ici,
 #: un agent qui publie ce type se fait refuser par SON PROPRE plugin
 #: (ValueError), et l'app ne voit jamais passer la demande.
-ARTIFACT_KINDS = ("mermaid", "markdown", "svg", "html", "drawio", "file", "motion")
+#: ``podcast`` est une carte audio (lecteur, chapitres, transcription) que
+#: SEULE l'app publie, une fois la synthese finie : l'agent la demande par
+#: ``pulse_podcast``, jamais par ``pulse_publish_artifact``. Il figure ici
+#: parce que la liste est le jumeau de l'app ; il est retire de ce qui se
+#: PUBLIE (``PUBLISHABLE_ARTIFACT_KINDS``).
+ARTIFACT_KINDS = ("mermaid", "markdown", "svg", "html", "drawio", "file", "motion", "podcast")
+
+#: Types que l'AGENT peut publier (enum de ``pulse_publish_artifact``). Sans
+#: cette liste a part, le schema annoncerait ``podcast`` au modele, qui
+#: publierait une carte audio sur un fichier que personne n'a synthetise.
+PUBLISHABLE_ARTIFACT_KINDS = tuple(kind for kind in ARTIFACT_KINDS if kind != "podcast")
 
 #: Bornes miroir de shared/artifacts.ts.
 MAX_ARTIFACT_CONTENT_LENGTH = 400_000

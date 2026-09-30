@@ -267,3 +267,18 @@ class TestVaultUrl:
     def test_propage_le_refus_de_chemin(self):
         with pytest.raises(vault.VaultPathError):
             vault.vault_url("http://app.test", "demo", "../secret")
+
+
+class TestPodcastKind:
+    # Jumeau de l'app, qui leve sur un type inconnu : sans ``podcast`` ici, une
+    # carte de podcast rejouee a l'agent serait illisible pour son plugin. Mais
+    # seule l'app en PUBLIE (apres synthese) : il est hors de l'enum annoncee.
+    def test_podcast_est_un_type_connu_de_lapp(self):
+        assert "podcast" in artifacts.ARTIFACT_KINDS
+
+    def test_podcast_ne_se_publie_pas(self):
+        assert "podcast" not in artifacts.PUBLISHABLE_ARTIFACT_KINDS
+        enum = _load("workspace").PUBLISH_SCHEMA["parameters"]["properties"]["kind"]["enum"]
+        assert "podcast" not in enum
+        # Et rien d'autre n'a disparu de l'enum.
+        assert set(enum) == set(artifacts.ARTIFACT_KINDS) - {"podcast"}
