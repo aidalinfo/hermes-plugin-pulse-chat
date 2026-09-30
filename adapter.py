@@ -107,6 +107,16 @@ from .connectors import (
     connector_url,
     parse_connector_error,
 )
+from .podcast import (
+    PODCAST_TOOL_DESCRIPTION,
+    PODCAST_TOOL_NAME,
+    PODCAST_TOOL_SCHEMA,
+    build_podcast_payload,
+    http_refusal as podcast_http_refusal,
+    podcast_url,
+    queued_result as podcast_queued,
+    refused_result as podcast_refused,
+)
 from .vault import VaultPathError, normalize_vault_path, vault_url
 from .workspace import (
     PUBLISH_DESCRIPTION,
@@ -1768,6 +1778,34 @@ class PulseChatAdapter(BasePlatformAdapter):
             return http_refusal(status, body)
         return published_result(artifact_id, kind, path)
 
+    async def tool_podcast(self, chat_id: str, args: Dict[str, Any]) -> str:
+        """Corps de ``pulse_podcast`` — rend TOUJOURS une chaine JSON.
+
+        Transport pur : aucune borne n'est appliquee ici (cf. ``podcast.py``),
+        l'app valide et refuse avec un code nomme. Rend des la reponse de
+        l'app, sans attendre la synthese (plusieurs minutes, au-dela du plafond
+        de 300 s d'Hermes). Aucun ``queued`` sans 2xx : un modele qui croit le
+        podcast en route l'annonce a l'humain, qui attendrait une carte qui
+        n'arrivera jamais.
+        """
+        try:
+            payload = build_podcast_payload(dict(args or {}))
+            data = json.dumps(payload).encode("utf-8")
+            status, body = await asyncio.to_thread(
+                self._http_detailed,
+                "POST",
+                podcast_url(self.base_url, chat_id),
+                body=data,
+                headers={"Content-Type": "application/json"},
+            )
+        except Exception as exc:
+            logger.warning("Pulse Chat: podcast non demande — %s", exc)
+            return podcast_refused("not_sent", str(exc))
+        if not 200 <= status < 300:
+            return podcast_http_refusal(status, body)
+        podcast_id = body.get("podcastId") if isinstance(body, dict) else None
+        return podcast_queued(podcast_id)
+
     # ── Connecteurs tiers (Outlook, Teams, agenda) ───────────────────────
 
     async def call_connector(
@@ -2806,6 +2844,50 @@ async def _pulse_publish_artifact(args: Dict[str, Any], **_kwargs: Any) -> str:
     return await _run_workspace_tool("tool_publish_artifact", args)
 
 
+async def _pulse_podcast(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Handler de ``pulse_podcast``.
+
+    Meme chemin que les outils de coffre : canal lu dans le contexte de
+    session (jamais un argument), appel planifie sur la boucle du WebSocket.
+    Les refus locaux (``no_channel``, ``not_connected``) sont re-rendus avec
+    les conseils du podcast : ceux du coffre parleraient d'un fichier.
+    """
+    out = await _run_workspace_tool("tool_podcast", args)
+    try:
+        parsed = json.loads(out)
+    except (TypeError, ValueError):
+        return podcast_refused("not_sent", "Reponse illisible")
+    if parsed.get("status") == "refused" and parsed.get("code") in (
+        "no_channel",
+        "not_connected",
+        "not_sent",
+    ):
+        return podcast_refused(parsed["code"], str(parsed.get("message") or ""))
+    return out
+
+
+def _register_podcast_tool(ctx) -> None:
+    """Outil de podcast. Isole : son echec ne fait tomber ni la plateforme ni
+    les autres outils."""
+    try:
+        registered = ctx.register_tool(
+            name=PODCAST_TOOL_NAME,
+            toolset="pulse_chat",
+            schema=PODCAST_TOOL_SCHEMA,
+            handler=_pulse_podcast,
+            is_async=True,
+            description=PODCAST_TOOL_DESCRIPTION,
+            emoji="🎙️",
+        )
+        if registered is None:
+            _warn_once(
+                "podcast_tool_shadowed",
+                f"Pulse Chat: l'outil {PODCAST_TOOL_NAME} n'a pas ete enregistre (nom deja pris ?)",
+            )
+    except Exception as exc:
+        _warn_once("podcast_tool_failed", f"Pulse Chat: outil {PODCAST_TOOL_NAME} non enregistre — {exc}")
+
+
 def _register_workspace_tools(ctx) -> None:
     """Outils de coffre et de publication. Chacun isole : l'echec de l'un
     n'empeche ni l'autre ni la plateforme."""
@@ -3132,6 +3214,17 @@ def register(ctx):
             "returned published. If those two tools are missing, the Pulse Chat "
             "MCP server offers channel_vault_upload_url (then PUT the file) and "
             "channel_artifact_publish instead.\n\n"
+            # Hermes n'annonce jamais un skill de plugin au modele : sans ce
+            # paragraphe, un agent a qui l'on demande « un resume a ecouter »
+            # ecrirait un long message, ou le lirait en note vocale.
+            "Podcasts: when a human asks for a podcast, an audio summary or "
+            "something to listen to, call pulse_podcast with a title and "
+            "chapters written as spoken prose (no Markdown, no bullet lists, no "
+            "tables). Pulse Chat synthesizes it; it will appear by itself in the "
+            "conversation (player, chapters, transcript) within a few minutes. "
+            "Do not copy the text into a message nor read it aloud; a short "
+            "accompanying sentence is fine. On refused, explain the reason to "
+            "the human.\n\n"
             # Le seul texte qui atteint TOUT agent : sans lui, le skill guide
             # ci-dessous n'existe pour personne (``register_skill`` = chargement
             # explicite), et un agent a qui une publication a ete refusee
@@ -3168,6 +3261,7 @@ def register(ctx):
         ctx.register_platform(**entry)
     _register_gate_tool(ctx)
     _register_workspace_tools(ctx)
+    _register_podcast_tool(ctx)
     _register_guide_skill(ctx)
     _register_browser(ctx)
     _register_todo_hook(ctx)
