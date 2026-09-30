@@ -303,7 +303,7 @@ Aucune mise à jour de l'app n'est requise : les routes existent déjà.
 
 ### Faire un podcast (`pulse_podcast`)
 
-Outil du plugin (≥ 1.16.0), **app ≥ 0.44.0 requise**. L'agent écrit un titre
+Outil du plugin (≥ 1.16.0), **app ≥ 0.45.0 requise**. L'agent écrit un titre
 et des chapitres en prose parlée ; **l'app** fait tout le reste — synthèse
 (voix Voxtral de l'agent), dépôt au coffre, carte dans le fil (lecteur,
 chapitres, transcription). Le plugin reste mince : il transporte.
@@ -330,7 +330,7 @@ pulse_podcast(title, chapters: [{title, summary?, text}])   # outil, toolset "pu
   `voice_disabled` (422, voix de l'agent éteinte), `podcast_in_progress` (409),
   `podcast_text_too_short` / `podcast_text_too_long` (400 / 413),
   `podcast_synthesis_unavailable` (501 — rendu « synthèse indisponible sur
-  cette instance »), `channel_not_found` (404, ou app < 0.44.0 qui ne connaît
+  cette instance »), `channel_not_found` (404, ou app < 0.45.0 qui ne connaît
   pas la route), `invalid_request` (400 de schéma, issues Zod résumées).
 - **`kind: "podcast"` existe côté artefacts mais ne se publie pas** : il est
   hors de l'enum de `pulse_publish_artifact`, qui le refuse en nommant
@@ -343,7 +343,7 @@ liste des outils du bot), puis qu'**aucun dossier de sauvegarde du plugin**
 (ex. `pulse-chat.bak/`) ne traîne sous `/opt/data/plugins/` — Hermes peut le
 charger à la place de la nouvelle version. `platform_hint` est le seul texte
 qui fait connaître l'outil au modèle. Un refus `channel_not_found` sur un canal
-qui existe signale une app antérieure à 0.44.0.
+qui existe signale une app antérieure à 0.45.0.
 
 ### Navigateur des agents (fournisseur `pulse`, `pulse_browser_handoff`)
 

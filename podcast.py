@@ -6,7 +6,7 @@ depot au coffre et la carte dans le fil sont faits par l'app Nuxt ; ce module
 ne connait ni le WebSocket ni le HTTP — il compose le payload et ce que
 l'outil rend au modele.
 
-Contrat (app >= 0.44.0) :
+Contrat (app >= 0.45.0) :
 
     plugin -> app   POST /api/agent/podcasts/<canal>
         {title, chapters: [{title, summary?, text}]}
@@ -47,7 +47,7 @@ PODCAST_TOOL_NAME = "pulse_podcast"
 
 #: Version minimale de l'app qui connait la route. Documentaire : une app plus
 #: ancienne rend 404 sur la route, relaye tel quel au modele.
-APP_MIN_VERSION = "0.44.0"
+APP_MIN_VERSION = "0.45.0"
 
 #: Bornes MIROIR de l'app, annoncees au modele (``maxLength`` / ``maxItems``) —
 #: JAMAIS appliquees par coupe ici, cf. docstring du module.
