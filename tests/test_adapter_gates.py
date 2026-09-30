@@ -196,6 +196,35 @@ class TestDecisionTardive:
         assert "APPROUVE" in event.text
         assert "Plan d'extraction" in event.text
 
+    def test_bot_redemarre_la_source_porte_le_decideur(self):
+        """Bot redemarre : aucune ``_last_source``. Hermes JETTE en silence un
+        message entrant sans ``user_id`` (``_hm_admit_event``) — c'est ce qui a
+        fait disparaitre la decision de ChantiersBot le 2026-09-30."""
+        adapter, dispatched = _adapter()
+        assert adapter._last_source == {}
+        asyncio.run(adapter._handle_gate_reply(_reply("gate-restart")))
+        source = dispatched[0].source
+        assert source["user_id"] == "u1"
+        assert source["user_name"] == "Killian"
+        assert source["chat_type"] == "group"
+
+    def test_bot_redemarre_sans_decideur_identifie_un_repli_stable(self):
+        """Le rejeu au hello envoie ``userId: ''`` quand le decideur a disparu :
+        jamais un ``user_id`` vide, un identifiant synthetique STABLE."""
+        adapter, dispatched = _adapter()
+        frame = _reply("gate-orphan")
+        frame["gate"]["decidedBy"] = {"userId": "", "userName": ""}
+        asyncio.run(adapter._handle_gate_reply(frame))
+        assert dispatched[0].source["user_id"] == adapter_module.FALLBACK_USER_ID
+        assert adapter_module.FALLBACK_USER_ID
+
+    def test_la_derniere_source_du_canal_est_reprise(self):
+        adapter, dispatched = _adapter()
+        known = {"chat_id": "compta", "user_id": "u9", "known": True}
+        adapter._last_source["compta"] = known
+        asyncio.run(adapter._handle_gate_reply(_reply("gate-known")))
+        assert dispatched[0].source is known
+
     def test_un_rejeu_ne_produit_quun_message(self):
         """Deux « approuve » feraient executer deux fois le meme plan."""
         adapter, dispatched = _adapter()

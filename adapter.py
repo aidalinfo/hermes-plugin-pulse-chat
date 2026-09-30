@@ -253,6 +253,16 @@ _SESSION_HEADER = "x-hermes-session"
 DEFAULT_SAMPLE_RATE = 24000
 _AUDIO_STREAMS_MAX = 8
 
+#: ``user_id`` d'une source de REPLI (message entrant fabrique par le plugin
+#: quand aucune source n'est memorisee pour le canal, typiquement apres un
+#: redemarrage du bot) lorsque la trame ne nomme personne. Jamais ``None`` :
+#: Hermes (``gateway/run_inbound.py::_hm_admit_event``) JETTE EN SILENCE un
+#: message entrant sans ``user_id`` des qu'il ne passe pas l'autorisation, et
+#: c'est le cas d'une source sans identite (``_is_user_authorized`` rend
+#: ``False`` sur un ``user_id`` vide AVANT de lire ``PULSE_CHAT_ALLOW_ALL_USERS``).
+#: Stable, pour que deux relances d'un meme canal tombent dans la meme session.
+FALLBACK_USER_ID = "pulse-chat:system"
+
 #: Tours dont une carte de plan a deja ete postee (cf. ``_forward_todo_plan``).
 #: Borne : un tour ne se « referme » jamais explicitement cote plugin.
 _MAX_TODO_TURNS = 200
@@ -2269,6 +2279,39 @@ class PulseChatAdapter(BasePlatformAdapter):
             return status, None
         return None
 
+    def _fallback_source(
+        self,
+        slug: str,
+        chat_name: Optional[str],
+        user_name: Optional[str],
+        user_id: Optional[str] = None,
+    ) -> Any:
+        """Source d'un message entrant FABRIQUE par le plugin (decision tardive,
+        relance du navigateur) : la derniere source connue du canal, sinon une
+        source de repli qui porte TOUJOURS un ``user_id`` non vide.
+
+        Sans ``_last_source`` (bot redemarre), une source a ``user_id=None``
+        etait mise en file par Hermes puis jetee en silence au rejeu
+        (« Ignoring message with no user_id ») : la decision n'atteignait jamais
+        l'agent. ``user_id`` est l'identifiant de la personne que la trame nomme
+        quand elle en porte un, sinon ``FALLBACK_USER_ID``.
+
+        La cle de session d'un ``group`` INCLUT le participant quand
+        ``group_sessions_per_user`` est vrai (defaut d'Hermes) : la source de
+        repli ouvre donc la session de CETTE personne dans le canal, pas
+        forcement celle ou la demande a ete faite.
+        """
+        known = self._last_source.get(slug)
+        if known is not None:
+            return known
+        return self.build_source(
+            chat_id=slug,
+            chat_name=chat_name or slug,
+            chat_type="group",
+            user_id=str(user_id).strip() if user_id and str(user_id).strip() else FALLBACK_USER_ID,
+            user_name=user_name or None,
+        )
+
     async def _handle_gate_reply(self, data: Dict[str, Any]) -> None:
         """Trame ``gate.reply`` : debloque l'outil qui attend, ou PREVIENT l'agent.
 
@@ -2298,12 +2341,11 @@ class PulseChatAdapter(BasePlatformAdapter):
         dedup_key = f"gate:{reply['requestId']}"
         if dedup_key in self._seen_message_ids:
             return
-        source = self._last_source.get(slug) or self.build_source(
-            chat_id=slug,
-            chat_name=reply["channelName"] or slug,
-            chat_type="group",
-            user_id=None,
-            user_name=reply["decidedBy"] or None,
+        source = self._fallback_source(
+            slug,
+            reply["channelName"],
+            reply["decidedBy"],
+            user_id=reply.get("decidedById"),
         )
         event = build_message_event(
             MessageEvent,
@@ -2340,13 +2382,9 @@ class PulseChatAdapter(BasePlatformAdapter):
         if notice is None:
             return
         slug = notice["channelSlug"]
-        source = self._last_source.get(slug) or self.build_source(
-            chat_id=slug,
-            chat_name=notice["channelName"] or slug,
-            chat_type="group",
-            user_id=None,
-            user_name=notice["by"],
-        )
+        # La trame ne porte qu'un NOM (``by``), jamais d'identifiant : repli
+        # synthetique si aucune source n'est memorisee.
+        source = self._fallback_source(slug, notice["channelName"], notice["by"])
         # Unique par rendu : chaque rendu est un fait nouveau (pas de rejeu au
         # hello pour cette trame), et deux rendus successifs doivent tous deux
         # relancer l'agent.

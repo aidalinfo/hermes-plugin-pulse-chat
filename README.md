@@ -223,6 +223,22 @@ Quatre choses qui ne se devinent pas :
   le même chemin qu'après un redémarrage du bot, où l'attente a disparu avec le
   process. Dédoublonnée : un rejeu au `hello` ne fait pas exécuter deux fois le
   même plan.
+- **Ce message porte TOUJOURS un `user_id` (≥ 1.15.4).** Après un redémarrage,
+  aucune source n'est mémorisée pour le canal et le plugin en fabrique une.
+  Jusqu'en 1.15.3 elle avait `user_id=None` : Hermes la mettait en file pendant
+  la restauration de démarrage puis la **jetait en silence** au rejeu
+  (`_hm_admit_event` : « Ignoring message with no user_id »), si bien que le
+  chemin « bot redémarré » n'a jamais fonctionné. La source de repli
+  (`_fallback_source`, partagée avec la relance du navigateur) porte
+  l'identifiant du décideur (`gate.decidedBy.userId`), sinon
+  `pulse-chat:system`. Elle passe l'autorisation parce que
+  `PULSE_CHAT_ALLOW_ALL_USERS=true` (ou `GATEWAY_ALLOW_ALL_USERS`) accepte tout
+  `user_id` non vide ; un bot restreint par `PULSE_CHAT_ALLOWED_USERS`
+  jetterait encore un repli dont l'identifiant n'y figure pas. Et la clé de
+  session d'un `group` inclut le participant (`group_sessions_per_user`, vrai
+  par défaut) : la décision ouvre la session du **décideur** dans le canal, qui
+  n'est celle de la demande que si c'est lui qui l'a faite — d'où le titre de
+  la demande dans le texte.
 - **Autre boucle, autre Future.** Le handler tourne sur la boucle que
   `_run_async` lui ouvre dans un thread, pas sur celle du WebSocket : l'attente
   est un `concurrent.futures.Future` (sûre entre threads), et le POST est
