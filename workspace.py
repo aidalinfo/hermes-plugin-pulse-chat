@@ -42,7 +42,7 @@ import mimetypes
 import os
 from typing import Any, Dict, Optional, Tuple
 
-from .artifacts import ARTIFACT_KINDS, MAX_ARTIFACT_CONTENT_LENGTH
+from .artifacts import MAX_ARTIFACT_CONTENT_LENGTH, PUBLISHABLE_ARTIFACT_KINDS
 
 VAULT_WRITE_TOOL_NAME = "pulse_vault_write"
 PUBLISH_TOOL_NAME = "pulse_publish_artifact"
@@ -132,7 +132,7 @@ PUBLISH_SCHEMA: Dict[str, Any] = {
         "properties": {
             "kind": {
                 "type": "string",
-                "enum": list(ARTIFACT_KINDS),
+                "enum": list(PUBLISHABLE_ARTIFACT_KINDS),
                 "description": (
                     "`file` pour un fichier deja ecrit au coffre (PDF, tableur...) ; "
                     "`motion` pour un FILM (page HTML animee par `t`, <= 2 Mo, "
@@ -378,6 +378,10 @@ _ADVICE = {
         "secondes ; si le refus persiste, dis-le a l'humain."
     ),
     "unsupported": "Ce type de fichier ne peut pas etre publie ainsi. Dis-le a l'humain.",
+    "podcast_not_publishable": (
+        "Un podcast se demande avec pulse_podcast (titre + chapitres en prose "
+        "parlee) : l'app fait la synthese et publie la carte elle-meme."
+    ),
     "vault_full": (
         "Le coffre de ce canal est plein (quota de fichiers). Dis-le a l'humain : "
         "il faut faire de la place."

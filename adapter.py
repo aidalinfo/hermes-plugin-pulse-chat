@@ -83,6 +83,8 @@ from .questions import (
     parse_question_reply,
 )
 from .artifacts import (
+    ARTIFACT_KINDS,
+    PUBLISHABLE_ARTIFACT_KINDS,
     build_artifact_payload,
     is_artifact_kind,
     normalize_title,
@@ -1707,6 +1709,16 @@ class PulseChatAdapter(BasePlatformAdapter):
         cet outil existe pour supprimer.
         """
         kind = args.get("kind")
+        if kind in ARTIFACT_KINDS and kind not in PUBLISHABLE_ARTIFACT_KINDS:
+            # Un podcast est une carte que SEULE l'app publie, apres synthese :
+            # publie ici, il pointerait vers un fichier que personne n'a lu a
+            # voix haute. Le refus nomme la bonne porte, sinon le modele
+            # reessaie avec un autre type.
+            return workspace_refused(
+                "podcast_not_publishable",
+                "Un podcast ne se publie pas avec pulse_publish_artifact : appelle "
+                "pulse_podcast (titre + chapitres), l'app fabrique la carte",
+            )
         if not is_artifact_kind(kind):
             return workspace_refused("invalid_request", f"Type d'artifact inconnu : {kind!r}")
         title = normalize_title(args.get("title"))

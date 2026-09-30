@@ -278,6 +278,24 @@ class _WsLoop:
         self.thread.join(timeout=2)
 
 
+class TestPublicationRefusee:
+    def test_publish_artifact_refuse_podcast_sans_appel(self):
+        adapter, calls = _adapter()
+        out = _run(
+            adapter.tool_publish_artifact("c", {"kind": "podcast", "title": "Point", "path": "a.mp3"})
+        )
+        assert out["status"] == "refused"
+        assert out["code"] == "podcast_not_publishable"
+        assert "pulse_podcast" in out["message"]
+        assert calls == []
+
+    def test_les_autres_types_publient_toujours(self):
+        adapter, calls = _adapter([(201, {})])
+        out = _run(adapter.tool_publish_artifact("c", {"kind": "file", "title": "Devis", "path": "a.pdf"}))
+        assert out["status"] == "published"
+        assert len(calls) == 1
+
+
 class TestHandler:
     def test_le_handler_atteint_ladaptateur_sur_la_boucle_du_ws(self):
         adapter, calls = _adapter()
