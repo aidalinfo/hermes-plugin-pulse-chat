@@ -427,6 +427,13 @@ identifiants du coffre « Passwords & Logins » d'Hermes (`agent/vault_store.py`
 Hermes **≥ v2026.9.11**) depuis le sous-onglet **Identifiants** de la page de
 l'agent. Plus besoin de `docker exec … hermes vault add`.
 
+**Le bot doit porter un secret d'agent `pca_…`** (`PULSE_CHAT_AGENT_TOKEN`,
+AgentCredential émis dans Pulse Chat) : l'app n'envoie AUCUNE commande
+d'identifiants à une connexion authentifiée par le jeton de service partagé (un
+ajout transporte un mot de passe), et refuse en 403 l'instantané et les
+réponses d'une session non vérifiée. Sans secret, l'onglet dit « posez un
+secret d'agent » et le journal du bot montre l'instantané refusé (HTTP 403).
+
 **Pur transport** (`credentials.py`) : qui a le droit, la fraîcheur de session,
 le débit, les doublons vivent dans l'app. La **vérité reste dans le bot** :
 l'app ne garde qu'un instantané de MÉTADONNÉES.
@@ -459,6 +466,10 @@ credentials.command      <- {requestId, profile, op: add|remove|reveal, …}
   porte `profile`, que l'app contraint aux profils de la session.
 - L'app attend la réponse **10 s** ; au-delà elle répond « le bot n'a pas
   répondu, rien n'a été modifié » et jette une réponse tardive.
+
+**Diagnostic — « l'onglet dit : posez un secret d'agent ».** Le bot est
+connecté par `PULSE_CHAT_TOKEN` seul : poser `PULSE_CHAT_AGENT_TOKEN`, puis
+`hermes gateway restart`.
 
 **Diagnostic — « l'onglet dit capacité absente ».** La capacité n'est annoncée
 que si `import agent.vault_store` réussit : vérifier l'image Hermes
