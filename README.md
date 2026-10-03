@@ -14,6 +14,7 @@ hermes-plugin/pulse-chat/
 ├── browser.py          # fournisseur de navigateur `pulse` + pulse_browser_handoff
 ├── podcast.py          # pulse_podcast : payload, résultats et refus (pur)
 ├── subsessions.py      # pulse_open_subsession / pulse_subsession_report (pur)
+├── credentials.py      # identifiants d'agent : relais du coffre « Passwords & Logins » d'Hermes
 ├── netguard.py         # garde-fous réseau : schémas, redirections, clair, journaux
 └── tests/              # pytest (sans hermes installé)
 ```
@@ -417,6 +418,53 @@ rien à l'écran**.
    à la personne du fil, rend `callee_unreachable` ;
 4. le fil est-il un Tête-à-tête ? Ailleurs, `subsession_not_allowed_here`. Un
    `subsessions_unavailable` signale une app antérieure à 0.51.0.
+
+### Identifiants d'agent (trame `credentials.command`)
+
+À partir de la **1.18.0**, **app ≥ 0.53.0 requise** (docs/48 de l'app). Un
+**admin d'instance** voit, ajoute, supprime et — avec garde-fous — révèle les
+identifiants du coffre « Passwords & Logins » d'Hermes (`agent/vault_store.py`,
+Hermes **≥ v2026.9.11**) depuis le sous-onglet **Identifiants** de la page de
+l'agent. Plus besoin de `docker exec … hermes vault add`.
+
+**Pur transport** (`credentials.py`) : qui a le droit, la fraîcheur de session,
+le débit, les doublons vivent dans l'app. La **vérité reste dans le bot** :
+l'app ne garde qu'un instantané de MÉTADONNÉES.
+
+```
+hello                    -> capabilities.features: ["credentials"]   (seulement si `import agent.vault_store` réussit)
+hello.ack                -> POST /api/agent/credentials/snapshot  {profile, items}   (métadonnées seules)
+credentials.command      <- {requestId, profile, op: add|remove|reveal, …}
+   add    -> add_item("login", label, {identifier_type, identifier, password, [otp_secret]}, origin=)
+   remove -> remove_item(handle)                (poignée `vault_…` locale seulement)
+   reveal -> resolve_secret(handle)["password"] ou totp_now(otp_secret)   (le CODE, jamais la clé)
+   puis, pour add/remove : POST …/snapshot      (AVANT la réponse : l'app relit la liste)
+          -> POST /api/agent/credentials/result/<requestId>  {ok, value?} | {ok: false, code, message}
+```
+
+- **Le secret ne se pose nulle part** : celui d'un ajout arrive dans la trame,
+  celui d'une révélation ne part **que** dans le corps de la réponse HTTP.
+  Aucun journal ne porte la trame ni le résultat (seulement l'opération,
+  l'issue et le statut HTTP) ; une exception imprévue rend son NOM de classe,
+  jamais son texte.
+- **Hors de la boucle WebSocket** : le coffre est synchrone (verrou de
+  fichier) et un gestionnaire externe peut être lent — chaque commande est
+  une tâche, chaque appel au coffre passe par `asyncio.to_thread`.
+- **1Password / Bitwarden** : listés seulement s'ils sont déverrouillés sans
+  invite (`source: onepassword|bitwarden`) ; jamais supprimés ni révélés
+  depuis Pulse (refus `not_allowed`). Cartes et adresses : listées, jamais
+  révélées.
+- **Plusieurs profils** : chaque commande s'exécute dans le HERMES_HOME du
+  profil qu'elle vise (même règle que la fiche de capacités), et l'instantané
+  porte `profile`, que l'app contraint aux profils de la session.
+- L'app attend la réponse **10 s** ; au-delà elle répond « le bot n'a pas
+  répondu, rien n'a été modifié » et jette une réponse tardive.
+
+**Diagnostic — « l'onglet dit capacité absente ».** La capacité n'est annoncée
+que si `import agent.vault_store` réussit : vérifier l'image Hermes
+(≥ v2026.9.11), puis la version réellement chargée (`hermes plugins list`,
+≥ 1.18.0, et **aucun dossier de sauvegarde** du plugin sous
+`/opt/data/plugins/`).
 
 ### Navigateur des agents (fournisseur `pulse`, `pulse_browser_handoff`)
 
