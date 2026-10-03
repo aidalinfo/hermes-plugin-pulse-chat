@@ -13,6 +13,7 @@ hermes-plugin/pulse-chat/
 ├── hello.py            # frame hello multi-profils pure (0 dépendance hermes)
 ├── browser.py          # fournisseur de navigateur `pulse` + pulse_browser_handoff
 ├── podcast.py          # pulse_podcast : payload, résultats et refus (pur)
+├── subsessions.py      # pulse_open_subsession / pulse_subsession_report (pur)
 ├── netguard.py         # garde-fous réseau : schémas, redirections, clair, journaux
 └── tests/              # pytest (sans hermes installé)
 ```
@@ -344,6 +345,78 @@ liste des outils du bot), puis qu'**aucun dossier de sauvegarde du plugin**
 charger à la place de la nouvelle version. `platform_hint` est le seul texte
 qui fait connaître l'outil au modèle. Un refus `channel_not_found` sur un canal
 qui existe signale une app antérieure à 0.45.0.
+
+### Ouvrir une sous-session (`pulse_open_subsession`, `pulse_subsession_report`)
+
+Outils du plugin (≥ 1.17.0), **app ≥ 0.51.0 requise** (docs/47 de l'app,
+Tête-à-tête). L'agent principal d'un fil Tête-à-tête ouvre **de lui-même** une
+sous-session — une conversation séparée, visible de la personne dans son fil —
+où il réunit 1 à 5 agents qu'il a le droit d'appeler ; il y **participe**, puis
+en rapporte le résultat. **L'app** fait tout le reste (canal, membres, carte
+dans le fil, livraison du rapport) ; le plugin transporte.
+
+```
+pulse_open_subsession(agents: [profil], title, brief, subsession?)   # outil, toolset "pulse_chat"
+    -> POST /api/agent/subsessions/open    {channel, agents, title, brief, subsession?}
+    <- 200 {subsession, slug, status}
+
+pulse_subsession_report(text)                                         # appelé DEPUIS la sous-session
+    -> POST /api/agent/subsessions/report  {channel, text}
+    <- 200 {subsession, status, delivered}
+```
+
+- **Le canal n'est pas un paramètre** : `channel` est lu dans
+  `gateway.session_context` — le fil Tête-à-tête pour l'ouverture, la
+  sous-session pour le rapport. `emitterProfile` n'est jamais envoyé (l'en-tête
+  de session dit déjà quel agent parle).
+- **Réponse immédiate** : l'app n'attend pas les autres agents. Leurs réponses
+  arrivent dans la sous-session comme des messages ordinaires ; le rapport
+  revient au fil principal comme un **message entrant ordinaire** marqué
+  `[Sous-session « titre » · rapport]` (ou `· sans rapport]` quand l'app
+  constate un silence), où l'agent répond à la personne. Aucune trame nouvelle.
+  Avec `subsession` (slug `ss-…`), l'ouverture **relance** une sous-session
+  existante (nouvelle consigne, mêmes agents). Plusieurs rapports successifs
+  sont permis ; `delivered: false` n'est pas un échec, l'app rejoue la remise.
+- **La consigne est le SEUL contexte** de la sous-session (les autres agents
+  n'ont pas lu la conversation) : la description l'exige complète. Les fichiers
+  passent par le coffre, partagé avec le fil.
+- **Aucune borne appliquée par le plugin** : 1 à 5 agents, titre ≤ 120,
+  consigne et rapport ≤ 8 000 caractères sont **annoncés**, jamais appliqués par
+  coupe. L'app refuse avec un code nommé.
+- **Refus relayés tels quels** (`code`, `message`, conseil `next`) :
+  `agent_session_required` (409, transitoire), `channel_not_found` (404),
+  `subsession_not_allowed_here` (409 : pas un fil Tête-à-tête, pas servi par cet
+  agent, ou depuis une sous-session), `callee_not_allowed` (422 — **la liste
+  `allowed`** des agents appelables, ≤ 10, est rendue au modèle pour qu'il
+  corrige au coup suivant, avec `notAllowed`), `callee_unreachable` (422,
+  `agent`), `callees_required` / `too_many_callees` / `duplicate_callee` /
+  `opener_cannot_be_callee` / `title_required` / `title_too_long` /
+  `brief_required` / `brief_too_long` (400, `max`), `subsession_not_found` (404),
+  `subsession_closed` (409), `subsession_callees_fixed` (400),
+  `not_subsession_opener` (409), `text_required` / `text_too_long` (400),
+  `invalid_request` (400 de schéma, issues Zod résumées), et
+  `subsessions_unavailable` (404 **sans code** : app < 0.51.0 qui ne connaît
+  pas la route).
+
+**Prérequis — chaque bot APPELÉ doit porter son identité** (session vérifiée,
+ou secret d'agent `pca_…`). Une sous-session est multi-agents : sans identité,
+les réponses d'un appelé y sont refusées en 409 `emitter_ambiguous`, **sans
+rien à l'écran**.
+
+**Diagnostic — « la sous-session ne s'ouvre pas ».** Dans l'ordre :
+1. la version réellement chargée : `hermes plugins list`, et
+   `pulse_open_subsession` dans la liste des outils du bot (≥ 1.17.0). Vérifier
+   qu'**aucun dossier de sauvegarde du plugin** (ex. `pulse-chat.bak/`) ne
+   traîne sous `/opt/data/plugins/` — Hermes peut le charger à la place de la
+   nouvelle version. `platform_hint` est le seul texte qui fait connaître les
+   outils au modèle ;
+2. le réglage **« Peut appeler »** de l'agent dans CETTE organisation
+   (Réglages › Agents › Accès), **vide par défaut** : un refus
+   `callee_not_allowed` avec `allowed: []` le signale ;
+3. la joignabilité : un appelé désactivé, ou en accès restreint qui n'ouvre pas
+   à la personne du fil, rend `callee_unreachable` ;
+4. le fil est-il un Tête-à-tête ? Ailleurs, `subsession_not_allowed_here`. Un
+   `subsessions_unavailable` signale une app antérieure à 0.51.0.
 
 ### Navigateur des agents (fournisseur `pulse`, `pulse_browser_handoff`)
 

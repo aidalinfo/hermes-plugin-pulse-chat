@@ -32,6 +32,7 @@ tente pas d'actions vouées au refus, et sait nommer à l'humain ce qui lui manq
 | Montrer un fichier ou un document dans la conversation | **outil du plugin** `pulse_publish_artifact` — `kind: "file"` + `path` pour un fichier déjà écrit au coffre ; en secours, **outil MCP** `channel_artifact_publish`. Republier le même `artifact_id` crée une nouvelle version |
 | Montrer un film (animation générée) | **outil du plugin** `pulse_publish_artifact` — `kind: "motion"` + `path` pour une page HTML déjà écrite au coffre |
 | Faire un podcast, un résumé audio, quelque chose « à écouter » | **outil du plugin** `pulse_podcast` — titre + chapitres en prose parlée ; l'app synthétise et publie la carte elle-même (jamais `pulse_publish_artifact`) |
+| Solliciter un autre agent depuis un fil Tête-à-tête | **outil du plugin** `pulse_open_subsession` — seulement les agents que tu as le droit d'appeler, consigne COMPLÈTE (seul contexte des autres agents) ; puis, DEPUIS la sous-session, `pulse_subsession_report` (seul chemin vers la conversation principale) |
 | Faire valider ton plan ou ton livrable avant d'agir | **outil du plugin** `pulse_request_approval` (skill `pulse-chat:approvals`) |
 | Faire faire par un humain ce que la page du navigateur exige (connexion, captcha, code SMS) | **outil du plugin** `pulse_browser_handoff` — le navigateur doit déjà être ouvert |
 | Accord sur une commande jugée dangereuse | **Hermes**, son garde-fou — tu n'as rien à appeler |
