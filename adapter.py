@@ -101,6 +101,7 @@ from .audio_stream import (
 )
 from . import browser as browser_provider
 from .capabilities import collect_capabilities
+from . import credentials as credentials_relay
 from .connectors import (
     ConnectorCapabilityError,
     build_connector_payload,
@@ -562,6 +563,12 @@ class PulseChatAdapter(BasePlatformAdapter):
         # a l'identique, sans en-tete de session (serveur anterieur, ou trame
         # perdue) — la compatibilite prime.
         self._session_token: Optional[str] = None
+        # Identifiants d'agent (docs/48 de l'app) : le coffre « Passwords &
+        # Logins » d'Hermes est-il importable ? Decide l'annonce au ``hello``.
+        self._credentials_enabled: bool = False
+        # Taches de commandes d'identifiants en vol — gardees pour ne pas etre
+        # ramassees en plein vol (asyncio ne garde qu'une reference faible).
+        self._credential_tasks: "set[asyncio.Task]" = set()
         # Derniere source par canal — cle de session d'une interruption.
         self._last_source: Dict[str, Any] = {}
         # Dernier bloc ``agentConfig`` recu par canal : un tour INJECTE par le
@@ -687,6 +694,10 @@ class PulseChatAdapter(BasePlatformAdapter):
             return
         self._session_token = token
         logger.info("Pulse Chat: jeton de session recu (identite de l'agent active)")
+        # Instantane des identifiants (metadonnees seules) DES que la session
+        # existe : l'app n'a sinon rien a montrer avant le premier ajout.
+        if self._credentials_enabled:
+            self._spawn_credentials(self._push_credentials_snapshot())
         # Capacite audio : c'est l'APP qui ouvre la voie parlee en flux. Une app
         # qui n'annonce rien laisse le plugin dans son comportement d'avant
         # (audio complet en fin de tour) — le plugin peut donc etre deploye en
@@ -794,6 +805,18 @@ class PulseChatAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("Pulse Chat: collecte des capacites en echec — %s", exc)
             capabilities = None
+
+        # Identifiants d'agent : la fonction n'est ANNONCEE que si le coffre
+        # d'Hermes s'importe (Hermes >= v2026.9.11) — sinon l'app dit pourquoi
+        # l'onglet est inerte. Annoncee meme si la fiche n'a pas pu etre
+        # recoltee : les deux pannes sont independantes.
+        self._credentials_enabled = credentials_relay.credentials_available()
+        if self._credentials_enabled:
+            capabilities = dict(capabilities or {})
+            features = [f for f in capabilities.get("features") or [] if isinstance(f, str)]
+            if credentials_relay.CREDENTIALS_FEATURE not in features:
+                features.append(credentials_relay.CREDENTIALS_FEATURE)
+            capabilities["features"] = features
 
         # Frame hello AVANT la boucle de reception : le serveur enregistre le
         # peer pour ces profils (last-wins par profil) puis rejoue les messages
@@ -904,6 +927,11 @@ class PulseChatAdapter(BasePlatformAdapter):
                         await self._handle_gate_reply(data)
                     except Exception:
                         logger.exception("Pulse Chat: erreur de traitement gate.reply")
+                elif data.get("type") == "credentials.command":
+                    # Commande d'identifiants (ajout, suppression, revelation) :
+                    # executee HORS de la boucle de reception — le coffre est
+                    # synchrone, et un gestionnaire externe peut etre lent.
+                    self._spawn_credentials(self._handle_credentials_command(data))
                 elif data.get("type") == "browser.control":
                     # Resout la Future d'un outil ``pulse_browser_handoff`` qui
                     # attend dans un AUTRE fil — ou, si plus personne n'attend,
@@ -2479,6 +2507,71 @@ class PulseChatAdapter(BasePlatformAdapter):
         )
         self._last_inbound_voice[slug] = False
         await self.handle_message(event)
+
+    # ── Identifiants d'agent (docs/48 de l'app) ─────────────────────────
+    #
+    # PUR TRANSPORT : `credentials.py` traduit, l'app decide. Le secret d'un
+    # ajout arrive dans la trame ; celui d'une revelation ne part QUE dans le
+    # corps de la reponse HTTP. Aucune ligne de journal ne porte la trame ni
+    # le resultat — seulement l'operation, l'issue et le statut HTTP.
+
+    def _spawn_credentials(self, coro) -> None:
+        task = asyncio.ensure_future(coro)
+        self._credential_tasks.add(task)
+        task.add_done_callback(self._credential_tasks.discard)
+
+    def _credentials_url(self, suffix: str) -> str:
+        return "%s/api/agent/credentials/%s" % (self.base_url.rstrip("/"), suffix)
+
+    async def _post_credentials(self, suffix: str, payload: Dict[str, Any]) -> int:
+        status, _ = await asyncio.to_thread(
+            self._http_detailed,
+            "POST",
+            self._credentials_url(suffix),
+            body=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        return status
+
+    async def _push_credentials_snapshot(self, profile: Optional[str] = None) -> None:
+        """Pousse l'instantane (metadonnees) de chaque profil servi — ou du seul
+        profil d'une commande. Jamais d'exception vers l'appelant."""
+        for name in [profile] if profile else list(self.profiles):
+            try:
+                items = await asyncio.to_thread(credentials_relay.collect_snapshot, name)
+            except Exception as exc:
+                logger.warning(
+                    "Pulse Chat: identifiants — instantane illisible (%s)", type(exc).__name__
+                )
+                continue
+            status = await self._post_credentials("snapshot", {"profile": name, "items": items})
+            if status != 200:
+                logger.warning(
+                    "Pulse Chat: identifiants — instantane refuse (HTTP %s, profil %s)", status, name
+                )
+
+    async def _handle_credentials_command(self, data: Dict[str, Any]) -> None:
+        request_id = str(data.get("requestId") or "")
+        op = str(data.get("op") or "")
+        if not request_id:
+            return
+        try:
+            result = await asyncio.to_thread(credentials_relay.execute, data)
+        except Exception as exc:  # pragma: no cover - `execute` ne leve pas
+            result = {"ok": False, "code": "error", "message": type(exc).__name__}
+        # L'instantane AVANT la reponse : l'app relit la liste en repondant a
+        # l'ecran, elle doit deja etre a jour.
+        if result.get("ok") and credentials_relay.is_mutation(data):
+            await self._push_credentials_snapshot(data.get("profile") or None)
+        status = await self._post_credentials(
+            "result/%s" % urllib.parse.quote(request_id, safe=""), result
+        )
+        logger.info(
+            "Pulse Chat: identifiants — %s %s (reponse HTTP %s)",
+            op,
+            "ok" if result.get("ok") else result.get("code"),
+            status,
+        )
 
     async def _handle_browser_control(self, data: Dict[str, Any]) -> None:
         """Trame ``browser.control`` : reveille l'outil qui attend, ou RELANCE l'agent.
