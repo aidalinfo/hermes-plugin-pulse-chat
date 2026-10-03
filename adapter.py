@@ -117,6 +117,22 @@ from .podcast import (
     queued_result as podcast_queued,
     refused_result as podcast_refused,
 )
+from .subsessions import (
+    OPEN_TOOL_DESCRIPTION as SUBSESSION_OPEN_DESCRIPTION,
+    OPEN_TOOL_NAME as SUBSESSION_OPEN_TOOL_NAME,
+    OPEN_TOOL_SCHEMA as SUBSESSION_OPEN_SCHEMA,
+    REPORT_TOOL_DESCRIPTION as SUBSESSION_REPORT_DESCRIPTION,
+    REPORT_TOOL_NAME as SUBSESSION_REPORT_TOOL_NAME,
+    REPORT_TOOL_SCHEMA as SUBSESSION_REPORT_SCHEMA,
+    build_open_payload as build_subsession_open_payload,
+    build_report_payload as build_subsession_report_payload,
+    http_refusal as subsession_http_refusal,
+    open_url as subsession_open_url,
+    opened_result as subsession_opened,
+    refused_result as subsession_refused,
+    report_url as subsession_report_url,
+    reported_result as subsession_reported,
+)
 from .vault import VaultPathError, normalize_vault_path, vault_url
 from .workspace import (
     PUBLISH_DESCRIPTION,
@@ -1806,6 +1822,52 @@ class PulseChatAdapter(BasePlatformAdapter):
         podcast_id = body.get("podcastId") if isinstance(body, dict) else None
         return podcast_queued(podcast_id)
 
+    # ── Sous-sessions du Tete-a-tete ─────────────────────────────────────
+
+    async def _subsession_post(self, url: str, payload: Dict[str, Any]) -> Tuple[int, Any]:
+        data = json.dumps(payload).encode("utf-8")
+        return await asyncio.to_thread(
+            self._http_detailed,
+            "POST",
+            url,
+            body=data,
+            headers={"Content-Type": "application/json"},
+        )
+
+    async def tool_open_subsession(self, chat_id: str, args: Dict[str, Any]) -> str:
+        """Corps de ``pulse_open_subsession`` — rend TOUJOURS une chaine JSON.
+
+        Transport pur (cf. ``subsessions.py``) : ``chat_id`` est le fil
+        Tete-a-tete lu dans le contexte de session, aucune borne n'est
+        appliquee ici. Rend des la reponse de l'app, qui n'attend pas les
+        autres agents. Aucun ``opened`` sans 2xx : un modele qui croit la
+        sous-session lancee l'annonce a la personne, qui attendrait un travail
+        que personne ne fait.
+        """
+        try:
+            payload = build_subsession_open_payload(chat_id, dict(args or {}))
+            status, body = await self._subsession_post(subsession_open_url(self.base_url), payload)
+        except Exception as exc:
+            logger.warning("Pulse Chat: sous-session non ouverte — %s", exc)
+            return subsession_refused("not_sent", str(exc))
+        if not 200 <= status < 300:
+            return subsession_http_refusal(status, body)
+        return subsession_opened(body, relaunch="subsession" in payload)
+
+    async def tool_subsession_report(self, chat_id: str, args: Dict[str, Any]) -> str:
+        """Corps de ``pulse_subsession_report`` — ``chat_id`` est la
+        SOUS-SESSION en cours. Le rapport rejoint la conversation principale
+        par l'app (message entrant ordinaire), rien a gerer ici."""
+        try:
+            payload = build_subsession_report_payload(chat_id, dict(args or {}))
+            status, body = await self._subsession_post(subsession_report_url(self.base_url), payload)
+        except Exception as exc:
+            logger.warning("Pulse Chat: rapport de sous-session non envoye — %s", exc)
+            return subsession_refused("not_sent", str(exc))
+        if not 200 <= status < 300:
+            return subsession_http_refusal(status, body)
+        return subsession_reported(body)
+
     # ── Connecteurs tiers (Outlook, Teams, agenda) ───────────────────────
 
     async def call_connector(
@@ -2888,6 +2950,75 @@ def _register_podcast_tool(ctx) -> None:
         _warn_once("podcast_tool_failed", f"Pulse Chat: outil {PODCAST_TOOL_NAME} non enregistre — {exc}")
 
 
+async def _run_subsession_tool(method_name: str, args: Dict[str, Any]) -> str:
+    """Chemin commun des deux outils de sous-session : celui des outils de
+    coffre (canal lu dans le contexte de session, jamais un argument ; appel
+    planifie sur la boucle du WebSocket). Les refus locaux sont re-rendus avec
+    les conseils des sous-sessions : ceux du coffre parleraient d'un fichier."""
+    out = await _run_workspace_tool(method_name, args)
+    try:
+        parsed = json.loads(out)
+    except (TypeError, ValueError):
+        return subsession_refused("not_sent", "Reponse illisible")
+    if parsed.get("status") == "refused" and parsed.get("code") in (
+        "no_channel",
+        "not_connected",
+        "not_sent",
+    ):
+        return subsession_refused(parsed["code"], str(parsed.get("message") or ""))
+    return out
+
+
+async def _pulse_open_subsession(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Handler de ``pulse_open_subsession``."""
+    return await _run_subsession_tool("tool_open_subsession", args)
+
+
+async def _pulse_subsession_report(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Handler de ``pulse_subsession_report``."""
+    return await _run_subsession_tool("tool_subsession_report", args)
+
+
+def _register_subsession_tools(ctx) -> None:
+    """Outils de sous-session. Chacun isole : l'echec de l'un n'empeche ni
+    l'autre, ni les autres outils, ni la plateforme."""
+    for name, schema, handler, description, emoji, key in (
+        (
+            SUBSESSION_OPEN_TOOL_NAME,
+            SUBSESSION_OPEN_SCHEMA,
+            _pulse_open_subsession,
+            SUBSESSION_OPEN_DESCRIPTION,
+            "🤝",
+            "subsession_open",
+        ),
+        (
+            SUBSESSION_REPORT_TOOL_NAME,
+            SUBSESSION_REPORT_SCHEMA,
+            _pulse_subsession_report,
+            SUBSESSION_REPORT_DESCRIPTION,
+            "📨",
+            "subsession_report",
+        ),
+    ):
+        try:
+            registered = ctx.register_tool(
+                name=name,
+                toolset="pulse_chat",
+                schema=schema,
+                handler=handler,
+                is_async=True,
+                description=description,
+                emoji=emoji,
+            )
+            if registered is None:
+                _warn_once(
+                    f"{key}_tool_shadowed",
+                    f"Pulse Chat: l'outil {name} n'a pas ete enregistre (nom deja pris ?)",
+                )
+        except Exception as exc:
+            _warn_once(f"{key}_tool_failed", f"Pulse Chat: outil {name} non enregistre — {exc}")
+
+
 def _register_workspace_tools(ctx) -> None:
     """Outils de coffre et de publication. Chacun isole : l'echec de l'un
     n'empeche ni l'autre ni la plateforme."""
@@ -3225,6 +3356,15 @@ def register(ctx):
             "Do not copy the text into a message nor read it aloud; a short "
             "accompanying sentence is fine. On refused, explain the reason to "
             "the human.\n\n"
+            # Meme raison : sans cette phrase, un agent de Tete-a-tete ne saurait
+            # ni qu'il peut solliciter un autre agent, ni comment en revenir.
+            "Sub-sessions: in a Tete-a-tete conversation, when the work needs "
+            "another agent, call pulse_open_subsession with the agents you are "
+            "allowed to call (never invent a profile), a title and a COMPLETE "
+            "brief (they have not read the conversation). You take part in the "
+            "sub-session; when the work is done, call pulse_subsession_report "
+            "from inside it: the report comes back to the main conversation as "
+            "an incoming message, where you answer the human.\n\n"
             # Le seul texte qui atteint TOUT agent : sans lui, le skill guide
             # ci-dessous n'existe pour personne (``register_skill`` = chargement
             # explicite), et un agent a qui une publication a ete refusee
@@ -3262,6 +3402,7 @@ def register(ctx):
     _register_gate_tool(ctx)
     _register_workspace_tools(ctx)
     _register_podcast_tool(ctx)
+    _register_subsession_tools(ctx)
     _register_guide_skill(ctx)
     _register_browser(ctx)
     _register_todo_hook(ctx)
