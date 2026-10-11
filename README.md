@@ -419,6 +419,18 @@ rien à l'écran**.
 4. le fil est-il un Tête-à-tête ? Ailleurs, `subsession_not_allowed_here`. Un
    `subsessions_unavailable` signale une app antérieure à 0.51.0.
 
+### Hermes 0.21.6 et la fiche de capacités
+
+À partir de la **1.18.1**, la fiche de capacités (modèle, skills, MCP) se
+remplit aussi sur **Hermes ≥ 0.21.6**, où `tools.skill_usage` a renommé
+`_read_bundled_manifest_names` en `_read_bundled_names`. Le plugin choisit le
+nom d'après la version d'Hermes, puis prend l'autre si le premier manque :
+aucun Hermes antérieur n'est touché. Depuis 0.21.6, les métadonnées du paquet
+annoncent `0.0.0` ; la version est lue dans le tampon d'installation
+(`hermes_cli.version_info`), et la fiche affiche donc la vraie version.
+Symptôme sur une 1.18.0 : avertissement « récolte des capacités impossible »
+dans le journal du bot, fiche vide dans l'app — le chat n'est pas touché.
+
 ### Identifiants d'agent (trame `credentials.command`)
 
 À partir de la **1.18.0**, **app ≥ 0.53.0 requise** (docs/48 de l'app). Un

@@ -362,3 +362,135 @@ def test_collect_capabilities_n_importe_jamais_profile_scope_directement():
     assert "web_deps" not in source
     assert "_profile_runtime_scope" in source
     assert "nullcontext" in source
+
+
+# ── Hermes 0.21.6 : `_read_bundled_manifest_names` renomme `_read_bundled_names`
+#
+# Verifie dans NousResearch/hermes-agent : present seul en `v2026.9.24`
+# (0.21.5), remplace seul en `v0.21.6`. La VERSION choisit le nom, la
+# presence du symbole tranche en dernier : aucun Hermes ancien ne doit perdre
+# sa fiche, aucun Hermes recent non plus.
+
+import sys
+import types
+
+_parse_version = capabilities._parse_version
+bundled_names_reader = capabilities.bundled_names_reader
+detect_hermes_version = capabilities.detect_hermes_version
+
+
+def _old_reader():
+    return {"ancien"}
+
+
+def _new_reader():
+    return {"nouveau"}
+
+
+def _skill_usage(**functions):
+    return types.SimpleNamespace(**functions)
+
+
+def test_parse_version_lit_les_formes_d_hermes():
+    assert _parse_version("0.21.6") == (0, 21, 6)
+    assert _parse_version("v0.21.6") == (0, 21, 6)
+    assert _parse_version("0.21.6+canary.20261011T070142Z") == (0, 21, 6)
+    assert _parse_version("0.22.0rc1") == (0, 22, 0)
+
+
+def test_parse_version_ignore_les_placeholders():
+    # 0.21.6 declare `version = "0.0.0"` dans pyproject.toml : le lire comme
+    # une version ferait passer un Hermes recent pour un ancien.
+    for value in ("0.0.0", "unknown", "", None, "1.2", "abc"):
+        assert _parse_version(value) is None
+
+
+def test_reader_hermes_0_21_5_prend_l_ancien_nom():
+    usage = _skill_usage(_read_bundled_manifest_names=_old_reader)
+    assert bundled_names_reader(usage, "0.21.5") is _old_reader
+
+
+def test_reader_hermes_0_21_6_prend_le_nouveau_nom():
+    usage = _skill_usage(_read_bundled_names=_new_reader)
+    assert bundled_names_reader(usage, "0.21.6") is _new_reader
+    assert bundled_names_reader(usage, "0.22.0") is _new_reader
+
+
+def test_reader_les_deux_noms_presents_la_version_tranche():
+    usage = _skill_usage(_read_bundled_manifest_names=_old_reader, _read_bundled_names=_new_reader)
+    assert bundled_names_reader(usage, "0.21.5") is _old_reader
+    assert bundled_names_reader(usage, "0.21.6") is _new_reader
+
+
+def test_reader_version_illisible_retombe_sur_le_symbole_present():
+    # Version inconnue (stamp absent, placeholder) : on ne casse ni l'un ni l'autre.
+    assert bundled_names_reader(_skill_usage(_read_bundled_names=_new_reader), None) is _new_reader
+    assert bundled_names_reader(_skill_usage(_read_bundled_manifest_names=_old_reader), "0.0.0") is _old_reader
+
+
+def test_reader_version_trompeuse_retombe_sur_le_symbole_present():
+    # Une version annoncee recente sur un code ancien (ou l'inverse) ne doit
+    # pas faire perdre la liste : la presence du symbole tranche.
+    assert bundled_names_reader(_skill_usage(_read_bundled_manifest_names=_old_reader), "0.21.6") is _old_reader
+    assert bundled_names_reader(_skill_usage(_read_bundled_names=_new_reader), "0.21.5") is _new_reader
+
+
+def test_reader_aucun_symbole_rend_none():
+    assert bundled_names_reader(_skill_usage(), "0.21.6") is None
+
+
+def _install_fake_hermes(monkeypatch, *, stamp=None, legacy=None):
+    hermes_cli = types.ModuleType("hermes_cli")
+    if legacy is not None:
+        hermes_cli.__version__ = legacy
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    if stamp is not None:
+        version_info = types.ModuleType("hermes_cli.version_info")
+        version_info.get_version_info = lambda: types.SimpleNamespace(base_version=stamp)
+        monkeypatch.setitem(sys.modules, "hermes_cli.version_info", version_info)
+    else:
+        monkeypatch.setitem(sys.modules, "hermes_cli.version_info", None)
+
+
+def _pkg_metadata(monkeypatch, value):
+    import importlib.metadata as metadata
+
+    def fake_version(name):
+        if value is None:
+            raise metadata.PackageNotFoundError(name)
+        return value
+
+    monkeypatch.setattr(metadata, "version", fake_version)
+
+
+def test_version_0_21_6_lue_dans_le_tampon_malgre_le_paquet_a_0_0_0(monkeypatch):
+    _install_fake_hermes(monkeypatch, stamp="0.21.6")
+    _pkg_metadata(monkeypatch, "0.0.0")
+    assert detect_hermes_version() == "0.21.6"
+
+
+def test_version_0_21_5_lue_dans_les_metadonnees_du_paquet(monkeypatch):
+    # 0.21.5 n'a pas `hermes_cli.version_info`.
+    _install_fake_hermes(monkeypatch, legacy="0.21.5")
+    _pkg_metadata(monkeypatch, "0.21.5")
+    assert detect_hermes_version() == "0.21.5"
+
+
+def test_version_repli_sur_dunder_version(monkeypatch):
+    _install_fake_hermes(monkeypatch, legacy="0.21.4")
+    _pkg_metadata(monkeypatch, None)
+    assert detect_hermes_version() == "0.21.4"
+
+
+def test_version_que_des_placeholders_rend_none(monkeypatch):
+    _install_fake_hermes(monkeypatch, stamp="unknown", legacy="0.0.0")
+    _pkg_metadata(monkeypatch, "0.0.0")
+    assert detect_hermes_version() is None
+
+
+def test_collect_capabilities_n_importe_plus_l_ancien_nom_en_dur():
+    # Un `from tools.skill_usage import _read_bundled_manifest_names` fait
+    # echouer TOUTE la fiche sur Hermes >= 0.21.6.
+    source = _MODULE_PATH.read_text(encoding="utf-8")
+    assert "import _read_bundled_manifest_names" not in source
+    assert "_read_bundled_manifest_names,\n" not in source
