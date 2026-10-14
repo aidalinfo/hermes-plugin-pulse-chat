@@ -15,6 +15,7 @@ hermes-plugin/pulse-chat/
 ├── podcast.py          # pulse_podcast : payload, résultats et refus (pur)
 ├── subsessions.py      # pulse_open_subsession / pulse_subsession_report (pur)
 ├── credentials.py      # identifiants d'agent : relais du coffre « Passwords & Logins » d'Hermes
+├── pilot_heartbeat.py  # battement de vie des cartes de pilotage (pur)
 ├── netguard.py         # garde-fous réseau : schémas, redirections, clair, journaux
 └── tests/              # pytest (sans hermes installé)
 ```
@@ -598,6 +599,41 @@ tâches » : barre d'avancement, étape en cours, checklist au dépli.
   carte et ne lève jamais dans Hermes. Face à une app antérieure au champ
   `todos`, le POST est refusé en 400 (une fois journalisé) : rien d'autre ne
   change.
+
+### Battement de vie du pilotage (Pulse Pilotage, CDC §7.5)
+
+À partir de la **1.19.0**. Une carte lancée depuis **Pulse Pilotage** est une
+exécution sous **bail** : sans signe de vie, l'app la suspend et alerte le
+responsable du mandat (« pause et escalade, pas répétition aveugle »). Le
+plugin bat **toutes les 20 s**, tant que le processus vit, pour **toutes** les
+exécutions que ses profils détiennent — il ne sait pas quelle carte est
+pilotée, et n'a pas à le savoir :
+
+```
+POST /api/agent/pilotage/heartbeat   {all: true, tokens: {<taskId>: <leaseToken>}}
+  -> 200 {leases: [{taskId, leaseToken, leaseExpiresAt, …}], refused: [{taskId, why}], heartbeatSeconds: 20}
+```
+
+- Le premier battement (sans jeton) **rejoint** le bail vivant et apprend son
+  jeton ; les suivants le présentent. Un bail qui bat vaut **90 s** : un
+  processus tué arrête de battre, l'app suspend la carte et alerte, sans rien
+  relancer.
+- Un refus (`stale_token`, `superseded`, `not_running`, `other_holder`,
+  `not_found`) n'arrête que **sa** carte : elle est oubliée et journalisée,
+  jamais rejouée. Un battement en retard n'est plus refusé (app ≥ 0.67.0 : le
+  bail détecte, il ne punit pas).
+- **Facultatif** depuis l'app 0.67.0 : l'app juge elle-même la vivacité d'une
+  exécution (connexion WebSocket + progression de l'agent) ; le battement ne
+  fait que raccourcir le constat d'un worker mort. Sans exécution détenue, le
+  plugin ne bat qu'**une fois par minute**.
+- **Secret d'agent requis** (`pca_…`) : l'app refuse le battement d'une session
+  `declared` (403 `agent_credential_required`) ; la boucle s'arrête alors, une
+  fois, sans rejouer.
+- Rien ne part avant le `hello.ack` (identité d'agent requise) ; une coupure
+  du WebSocket n'arrête pas la boucle (ce n'est pas une mort du worker).
+- **App antérieure** (route absente ⇒ 404) : la boucle s'arrête pour de bon,
+  sans bruit, et le plugin fonctionne exactement comme avant. Les cartes du
+  plan de travail ordinaire (sans pilotage) ne sont pas concernées.
 
 ### Router un envoi vers un canal Pulse Chat
 
