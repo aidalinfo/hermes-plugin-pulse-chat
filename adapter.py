@@ -171,6 +171,7 @@ from .todos import (
     todo_message_id,
 )
 from .reconnect import is_retryable_ws_error, reconnect_delay
+from . import pilot_heartbeat
 from .netguard import (
     ALLOW_INSECURE_ENV,
     MEDIA_HOSTS_ENV,
@@ -626,6 +627,12 @@ class PulseChatAdapter(BasePlatformAdapter):
         # Boucle du WebSocket, capturee a la connexion : c'est sur elle que le
         # handler fait poster la demande.
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Battement de vie des cartes de PILOTAGE (cf. pilot_heartbeat.py) :
+        # tache demarree a la premiere connexion, vivante tant que le processus
+        # vit (une coupure WS n'est pas une mort de worker). Arretee pour de bon
+        # si l'app ne connait pas la route (404).
+        self._pilot_heartbeat_task: Optional[asyncio.Task] = None
+        self._pilot_heartbeat_unsupported = False
         _LIVE_ADAPTERS.add(self)
 
     @property
@@ -841,6 +848,7 @@ class PulseChatAdapter(BasePlatformAdapter):
         self._last_connect_retryable = True
         self._recv_task = asyncio.create_task(self._receive_loop())
         self._mark_connected()
+        self._ensure_pilot_heartbeat()
         logger.info(
             "Pulse Chat: connecte a %s (%s) — profils %s, agent '%s'",
             self.base_url,
@@ -860,6 +868,16 @@ class PulseChatAdapter(BasePlatformAdapter):
             reconnect_task.cancel()
             try:
                 await reconnect_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+        heartbeat_task, self._pilot_heartbeat_task = self._pilot_heartbeat_task, None
+        if heartbeat_task and not heartbeat_task.done():
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
             except asyncio.CancelledError:
                 pass
             except Exception:
@@ -963,6 +981,67 @@ class PulseChatAdapter(BasePlatformAdapter):
                     except Exception:
                         pass
                 self._ensure_reconnect_task()
+
+    # ── Battement de vie du pilotage (CDC §7.5, cf. pilot_heartbeat.py) ──
+
+    def _ensure_pilot_heartbeat(self) -> None:
+        """Demarre la boucle de battement si elle ne tourne pas deja."""
+        if self._pilot_heartbeat_unsupported:
+            return
+        if self._pilot_heartbeat_task is not None and not self._pilot_heartbeat_task.done():
+            return
+        self._pilot_heartbeat_task = asyncio.create_task(self._pilot_heartbeat_loop())
+
+    async def _pilot_heartbeat_once(self, tokens: Dict[str, int]) -> Tuple[Dict[str, int], Optional[str], float]:
+        """UN battement groupe : ``(jetons, arret, intervalle)``.
+
+        Sans jeton de session (avant le ``hello.ack``), rien ne part : l'app
+        refuserait un battement sans identite d'agent.
+        """
+        if not self._session_token:
+            return tokens, None, float(pilot_heartbeat.HEARTBEAT_SECONDS)
+        body = json.dumps(pilot_heartbeat.build_body(tokens)).encode("utf-8")
+        status, payload = await asyncio.to_thread(
+            self._http_detailed,
+            "POST",
+            pilot_heartbeat.heartbeat_url(self.base_url),
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        fresh, stop, interval = pilot_heartbeat.read_response(status, payload, tokens)
+        if status == 200 and isinstance(payload, dict):
+            for refused in payload.get("refused") or []:
+                if isinstance(refused, dict):
+                    # Le serveur a suspendu (bail expire) ou ignore (jeton
+                    # perime) : les ecritures suivantes de CETTE carte seront
+                    # refusees a leur point d'effet. Rien ne se rejoue ici.
+                    logger.warning(
+                        "Pulse Chat: battement de pilotage refuse pour la carte %s (%s) — "
+                        "reprise par un humain depuis le pilotage",
+                        refused.get("taskId"),
+                        refused.get("why"),
+                    )
+        return fresh, stop, interval
+
+    async def _pilot_heartbeat_loop(self) -> None:
+        """Bat toutes les 20 s pour les executions pilotees que ces profils detiennent."""
+        tokens: Dict[str, int] = {}
+        while True:
+            interval = float(pilot_heartbeat.HEARTBEAT_SECONDS)
+            try:
+                tokens, stop, interval = await self._pilot_heartbeat_once(tokens)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Jamais de chute de la boucle : un battement manque est
+                # rattrape au suivant, avant l'echeance du bail (90 s).
+                logger.warning("Pulse Chat: battement de pilotage en echec — %s", exc)
+                stop = None
+            if stop == "unsupported":
+                self._pilot_heartbeat_unsupported = True
+                logger.info("Pulse Chat: l'app ne connait pas le battement de pilotage — arret")
+                return
+            await asyncio.sleep(interval)
 
     def _ensure_reconnect_task(self) -> None:
         """Demarre la boucle de reconnexion si elle ne tourne pas deja."""
