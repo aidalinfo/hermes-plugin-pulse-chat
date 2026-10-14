@@ -1012,9 +1012,9 @@ class PulseChatAdapter(BasePlatformAdapter):
         if status == 200 and isinstance(payload, dict):
             for refused in payload.get("refused") or []:
                 if isinstance(refused, dict):
-                    # Le serveur a suspendu (bail expire) ou ignore (jeton
-                    # perime) : les ecritures suivantes de CETTE carte seront
-                    # refusees a leur point d'effet. Rien ne se rejoue ici.
+                    # Jeton perime (prise anterieure), tentative remplacee ou
+                    # arretee, autre detenteur : cette carte n'est plus la
+                    # notre. Rien ne se rejoue ici.
                     logger.warning(
                         "Pulse Chat: battement de pilotage refuse pour la carte %s (%s) — "
                         "reprise par un humain depuis le pilotage",
@@ -1040,6 +1040,16 @@ class PulseChatAdapter(BasePlatformAdapter):
             if stop == "unsupported":
                 self._pilot_heartbeat_unsupported = True
                 logger.info("Pulse Chat: l'app ne connait pas le battement de pilotage — arret")
+                return
+            if stop == "credential_required":
+                # Session `declared` (jeton de service partage) : l'app reserve
+                # le battement aux sessions verifiees. Elle juge la vivacite
+                # sans lui ; le reessayer journaliserait un refus toutes les 20 s.
+                self._pilot_heartbeat_unsupported = True
+                logger.info(
+                    "Pulse Chat: battement de pilotage reserve aux secrets d'agent (pca_…) — arret ; "
+                    "l'app juge la vivacite sans lui"
+                )
                 return
             await asyncio.sleep(interval)
 
