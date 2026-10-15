@@ -56,6 +56,7 @@ class TestSchemas:
         assert "COMPLETE" in text
         assert "coffre" in text
         assert "PARTICIPES" in text
+        assert "@mention" in text
         assert "pulse_subsession_report" in text
         assert "n'invente jamais" in text
         assert "tu ne le passes pas" in text
