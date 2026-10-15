@@ -350,9 +350,11 @@ qui existe signale une app antérieure à 0.45.0.
 
 ### Ouvrir une sous-session (`pulse_open_subsession`, `pulse_subsession_report`)
 
-Outils du plugin (≥ 1.17.0), **app ≥ 0.51.0 requise** (docs/47 de l'app,
-Tête-à-tête). L'agent principal d'un fil Tête-à-tête ouvre **de lui-même** une
-sous-session — une conversation séparée, visible de la personne dans son fil —
+Outils du plugin (≥ 1.17.0), **app ≥ 0.51.0 requise** — depuis un fil Tête-à-tête seulement jusqu'à l'app
+0.70.0, depuis TOUT fil humain que l'agent sert (canal, fil de tâche,
+conversation privée) au-delà (docs/47 de l'app,
+Tête-à-tête). L'agent d'un fil ouvre **de lui-même** une sous-session — une
+conversation séparée, visible des personnes du fil —
 où il réunit 1 à 5 agents qu'il a le droit d'appeler ; il y **participe**, puis
 en rapporte le résultat. **L'app** fait tout le reste (canal, membres, carte
 dans le fil, livraison du rapport) ; le plugin transporte.
@@ -387,8 +389,10 @@ pulse_subsession_report(text)                                         # appelé 
   coupe. L'app refuse avec un code nommé.
 - **Refus relayés tels quels** (`code`, `message`, conseil `next`) :
   `agent_session_required` (409, transitoire), `channel_not_found` (404),
-  `subsession_not_allowed_here` (409 : pas un fil Tête-à-tête, pas servi par cet
-  agent, ou depuis une sous-session), `callee_not_allowed` (422 — **la liste
+  `subsession_not_allowed_here` (409 : fil non servi par cet agent, depuis une
+  sous-session ou une salle de routine/webhook — et, app ≤ 0.70.0, hors d'un
+  fil Tête-à-tête), `emitter_ambiguous` (409 : plusieurs agents du fil portés
+  par la même session), `callee_not_allowed` (422 — **la liste
   `allowed`** des agents appelables, ≤ 10, est rendue au modèle pour qu'il
   corrige au coup suivant, avec `notAllowed`), `callee_unreachable` (422,
   `agent`), `callees_required` / `too_many_callees` / `duplicate_callee` /
@@ -417,7 +421,8 @@ rien à l'écran**.
    `callee_not_allowed` avec `allowed: []` le signale ;
 3. la joignabilité : un appelé désactivé, ou en accès restreint qui n'ouvre pas
    à la personne du fil, rend `callee_unreachable` ;
-4. le fil est-il un Tête-à-tête ? Ailleurs, `subsession_not_allowed_here`. Un
+4. le fil est-il une salle de routine/webhook, ou l'app ≤ 0.70.0 hors d'un
+   Tête-à-tête ? Alors `subsession_not_allowed_here`. Un
    `subsessions_unavailable` signale une app antérieure à 0.51.0.
 
 ### Identifiants d'agent (trame `credentials.command`)

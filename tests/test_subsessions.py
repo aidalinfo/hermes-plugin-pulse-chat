@@ -50,7 +50,8 @@ class TestSchemas:
     def test_la_description_douverture_dit_lessentiel(self):
         text = ss.OPEN_TOOL_DESCRIPTION
         assert "Peut appeler" in text
-        assert "Tete-a-tete" in text
+        assert "fil de tache" in text
+        assert "jamais depuis une sous-session" in text
         assert "SEUL contexte" in text
         assert "COMPLETE" in text
         assert "coffre" in text
