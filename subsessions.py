@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Sous-sessions du Tete-a-tete — partie PURE.
+"""Sous-sessions — partie PURE.
 
 L'adaptateur reste mince : il TRANSPORTE. Ouvrir la sous-session (canal,
 membres, agents, carte dans le fil), y poster la consigne, livrer le rapport
@@ -24,7 +24,8 @@ Quatre choix qui ne se devinent pas :
 
 - **Le canal n'est pas un parametre** (meme regle que ``pulse_request_approval``,
   ``pulse_podcast`` et les outils de coffre) : il vient de
-  ``gateway.session_context``. Pour l'ouverture, c'est le fil Tete-a-tete ;
+  ``gateway.session_context``. Pour l'ouverture, c'est le fil en cours
+  (Tete-a-tete, canal, fil de tache, conversation privee — app >= 0.71.0) ;
   pour le rapport, c'est la SOUS-SESSION en cours. Un parametre ferait du
   choix du canal une sortie de LLM.
 - **Aucune borne appliquee ici.** 1 a 5 agents, titre <= 120, consigne et
@@ -67,9 +68,10 @@ OPEN_TOOL_DESCRIPTION = (
     "Ouvre une SOUS-SESSION : une conversation separee, visible de la personne "
     "dans son fil, ou tu reunis 1 a "
     f"{MAX_CALLEES} autres agents pour un travail qui demande leurs competences. "
-    "Tu decides seul de l'ouvrir quand le travail l'exige. Uniquement depuis une "
-    "conversation Tete-a-tete (pas depuis une autre conversation, ni depuis une "
-    "sous-session). Tu ne peux appeler QUE les agents que ton administrateur t'a "
+    "Tu decides seul de l'ouvrir quand le travail l'exige. Depuis la conversation "
+    "en cours, quelle qu'elle soit : Tete-a-tete, canal, fil de tache, "
+    "conversation privee (jamais depuis une sous-session ni une salle de "
+    "routine ou de webhook). Tu ne peux appeler QUE les agents que ton administrateur t'a "
     "autorise a appeler (reglage « Peut appeler ») : n'invente jamais un profil "
     "d'agent — en cas de refus `callee_not_allowed`, la liste `allowed` te donne "
     "ceux que tu peux appeler. La consigne (`brief`) est le SEUL contexte de la "
@@ -77,8 +79,11 @@ OPEN_TOOL_DESCRIPTION = (
     "COMPLETE (objectif, faits utiles, contraintes, livrable attendu). Les "
     "fichiers passent par le coffre, partage avec la conversation : ecris-les "
     "avec pulse_vault_write et cite leur chemin dans la consigne. Tu PARTICIPES a "
-    "la sous-session : tu y recois les reponses des autres agents, comme dans une "
-    "conversation separee, et la personne peut y ecrire. Quand le travail est "
+    "la sous-session, et la personne peut y ecrire. Entre agents, on ne se parle "
+    "QUE par @mention (app >= 0.71.0) : un message n'atteint un autre agent que "
+    "s'il le cite (@profil) ; pour relancer un agent, cite-le, et les autres te "
+    "citent pour te rendre leur travail. N'ecris ni accuse de reception ni "
+    "message de statut, et ne reponds pas a ceux des autres. Quand le travail est "
     f"fait, appelle {REPORT_TOOL_NAME} DEPUIS la sous-session : c'est le seul "
     "chemin vers la conversation principale. L'outil rend aussitot (il n'attend "
     "pas les reponses). Pour relancer une sous-session deja ouverte, rappelle-le "
@@ -360,10 +365,11 @@ _ADVICE = {
         "personne ; ne reessaie pas."
     ),
     "subsession_not_allowed_here": (
-        "Une sous-session ne s'ouvre que depuis une conversation Tete-a-tete que "
-        "tu sers, et jamais depuis une sous-session. Fais le travail toi-meme ici, "
-        "ou dis a la personne que tu ne peux pas solliciter d'autre agent depuis "
-        "cette conversation."
+        "Une sous-session ne s'ouvre que depuis une conversation que tu sers, "
+        "jamais depuis une sous-session ni une salle de routine ou de webhook "
+        "(et, sur une app < 0.71.0, seulement depuis un Tete-a-tete). Fais le "
+        "travail toi-meme ici, ou dis a la personne que tu ne peux pas solliciter "
+        "d'autre agent depuis cette conversation."
     ),
     "callee_not_allowed": (
         "Tu ne peux appeler que les agents de la liste `allowed` (profils exacts). "

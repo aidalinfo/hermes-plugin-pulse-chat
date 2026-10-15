@@ -4,7 +4,7 @@
 Ce qui est verifie ici, et chaque point est un mode d'echec MUET :
 
   - le canal vient du contexte de session, jamais d'un argument — le fil
-    Tete-a-tete pour l'ouverture, la SOUS-SESSION pour le rapport ;
+    fil en cours pour l'ouverture, la SOUS-SESSION pour le rapport ;
   - le handler tourne sur une AUTRE boucle que celle du WebSocket (c'est ce
     que fait ``model_tools._run_async``) et atteint quand meme l'adaptateur ;
   - l'outil rend AUSSITOT la reponse de l'app, sans rien attendre ;

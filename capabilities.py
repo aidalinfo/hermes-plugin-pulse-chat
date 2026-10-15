@@ -216,6 +216,92 @@ def build_capabilities(
     }
 
 
+#: Premiere version d'Hermes ou ``tools.skill_usage._read_bundled_manifest_names``
+#: s'appelle ``_read_bundled_names`` (meme contrat : un ``Set[str]`` de noms de
+#: skills livres avec Hermes). Verifie dans NousResearch/hermes-agent, tags
+#: ``v2026.9.24`` (0.21.5, ancien nom) et ``v0.21.6`` (nouveau nom seul).
+_BUNDLED_NAMES_RENAMED_IN = (0, 21, 6)
+_BUNDLED_NAMES_NEW = "_read_bundled_names"
+_BUNDLED_NAMES_OLD = "_read_bundled_manifest_names"
+
+
+def _parse_version(text: Any) -> Optional[tuple]:
+    """``"0.21.6"`` -> ``(0, 21, 6)`` ; ``None`` si illisible ou PLACEHOLDER.
+
+    ``"0.0.0"`` et ``"unknown"`` sont des valeurs de repli d'Hermes, pas des
+    versions : depuis 0.21.6, ``pyproject.toml`` declare ``version = "0.0.0"``
+    (la vraie version vit dans le tampon d'installation). Les lire comme une
+    version ferait passer un 0.21.6 pour un Hermes ancien."""
+    if not isinstance(text, str):
+        return None
+    parts = []
+    for chunk in text.strip().lstrip("vV").split("+", 1)[0].split(".")[:3]:
+        digits = ""
+        for ch in chunk:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            return None
+        parts.append(int(digits))
+    if len(parts) < 3 or tuple(parts) == (0, 0, 0):
+        return None
+    return tuple(parts)
+
+
+def detect_hermes_version() -> Optional[str]:
+    """Version d'Hermes, ou ``None`` si aucune source ne la donne.
+
+    Dans l'ordre : ``hermes_cli.version_info.get_version_info().base_version``
+    (0.21.6+, lu dans le tampon d'installation de l'image), puis les
+    metadonnees du paquet ``hermes-agent`` (vraies jusqu'a 0.21.5, ``0.0.0``
+    depuis), puis ``hermes_cli.__version__``. Une source qui rend un
+    placeholder est ignoree. Ne leve jamais."""
+    candidates: List[Any] = []
+    try:
+        from hermes_cli.version_info import get_version_info
+
+        candidates.append(getattr(get_version_info(), "base_version", None))
+    except Exception:
+        pass
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        candidates.append(_pkg_version("hermes-agent"))
+    except Exception:
+        pass
+    try:
+        import hermes_cli
+
+        candidates.append(getattr(hermes_cli, "__version__", None))
+    except Exception:
+        pass
+    for candidate in candidates:
+        if _parse_version(candidate) is not None:
+            return str(candidate).strip().lstrip("vV")
+    return None
+
+
+def bundled_names_reader(skill_usage: Any, version: Optional[str]) -> Optional[Any]:
+    """La fonction de ``tools.skill_usage`` qui liste les skills livres.
+
+    Choisie par la VERSION d'Hermes (>= 0.21.6 : nouveau nom, sinon l'ancien),
+    puis l'autre nom en repli si le premier manque : la version n'est qu'un
+    indice (canary, retour arriere, version illisible), la presence du symbole
+    est le fait. ``None`` si aucun des deux n'existe — la fiche perd alors la
+    provenance « builtin » de ses skills, jamais la fiche entiere."""
+    parsed = _parse_version(version)
+    if parsed is not None and parsed >= _BUNDLED_NAMES_RENAMED_IN:
+        order = (_BUNDLED_NAMES_NEW, _BUNDLED_NAMES_OLD)
+    else:
+        order = (_BUNDLED_NAMES_OLD, _BUNDLED_NAMES_NEW)
+    for name in order:
+        reader = getattr(skill_usage, name, None)
+        if callable(reader):
+            return reader
+    return None
+
+
 def _profile_scope(profile: str):
     """Contexte de lecture de la configuration pour ``profile``.
 
@@ -291,11 +377,6 @@ def collect_capabilities(profile: str) -> Optional[Dict[str, Any]]:
     null`` cote frame hello).
     """
     try:
-        from importlib.metadata import version as _pkg_version
-    except ImportError:  # pragma: no cover - py < 3.8, hors cible (3.9+)
-        _pkg_version = None  # type: ignore[assignment]
-
-    try:
         # `_profile_scope` n'est PAS importable : c'est une fonction imbriquee
         # dans `gateway/platforms/api_server.py` (definie dans le corps d'une
         # autre fonction), et les usages `hermes_cli/web_routers/*.py` passent
@@ -306,9 +387,9 @@ def collect_capabilities(profile: str) -> Optional[Dict[str, Any]]:
         with _profile_scope(profile):
             from tools.skills_tool import _find_all_skills
             from hermes_cli.skills_config import get_disabled_skills
+            from tools import skill_usage
             from tools.skill_usage import (
                 _read_hub_installed_names,
-                _read_bundled_manifest_names,
                 activity_count,
             )
             from hermes_cli.mcp_config import _get_mcp_servers
@@ -322,7 +403,15 @@ def collect_capabilities(profile: str) -> Optional[Dict[str, Any]]:
             skills = _find_all_skills() or []
             disabled = set(get_disabled_skills(config) or [])
             hub_names = set(_read_hub_installed_names() or [])
-            bundled_names = set(_read_bundled_manifest_names() or [])
+            hermes_version = detect_hermes_version()
+            read_bundled = bundled_names_reader(skill_usage, hermes_version)
+            if read_bundled is None:
+                logger.warning(
+                    "Pulse Chat: liste des skills livres introuvable (Hermes %s) "
+                    "— provenance « builtin » omise",
+                    hermes_version or "?",
+                )
+            bundled_names = set((read_bundled() if read_bundled else None) or [])
             mcp_servers = _get_mcp_servers() or {}
 
             # Usage brut par skill : `load_usage()` (tools.skill_usage), employe
@@ -345,13 +434,6 @@ def collect_capabilities(profile: str) -> Optional[Dict[str, Any]]:
                     "compteurs a 0",
                     profile,
                 )
-
-            hermes_version = None
-            if _pkg_version is not None:
-                try:
-                    hermes_version = _pkg_version("hermes-agent")
-                except Exception:  # pragma: no cover - nom de paquet variable
-                    hermes_version = None
 
             plugin_version = _read_plugin_version()
 

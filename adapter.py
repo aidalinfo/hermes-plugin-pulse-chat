@@ -1939,7 +1939,7 @@ class PulseChatAdapter(BasePlatformAdapter):
         podcast_id = body.get("podcastId") if isinstance(body, dict) else None
         return podcast_queued(podcast_id)
 
-    # ── Sous-sessions du Tete-a-tete ─────────────────────────────────────
+    # ── Sous-sessions ────────────────────────────────────────────────────
 
     async def _subsession_post(self, url: str, payload: Dict[str, Any]) -> Tuple[int, Any]:
         data = json.dumps(payload).encode("utf-8")
@@ -1955,7 +1955,7 @@ class PulseChatAdapter(BasePlatformAdapter):
         """Corps de ``pulse_open_subsession`` — rend TOUJOURS une chaine JSON.
 
         Transport pur (cf. ``subsessions.py``) : ``chat_id`` est le fil
-        Tete-a-tete lu dans le contexte de session, aucune borne n'est
+        en cours lu dans le contexte de session, aucune borne n'est
         appliquee ici. Rend des la reponse de l'app, qui n'attend pas les
         autres agents. Aucun ``opened`` sans 2xx : un modele qui croit la
         sous-session lancee l'annonce a la personne, qui attendrait un travail
@@ -3538,9 +3538,11 @@ def register(ctx):
             "Do not copy the text into a message nor read it aloud; a short "
             "accompanying sentence is fine. On refused, explain the reason to "
             "the human.\n\n"
-            # Meme raison : sans cette phrase, un agent de Tete-a-tete ne saurait
-            # ni qu'il peut solliciter un autre agent, ni comment en revenir.
-            "Sub-sessions: in a Tete-a-tete conversation, when the work needs "
+            # Meme raison : sans cette phrase, un agent ne saurait ni qu'il peut
+            # solliciter un autre agent, ni comment en revenir.
+            "Sub-sessions: in any conversation you serve (Tete-a-tete, channel, "
+            "task thread, private conversation — never from a sub-session or a "
+            "routine/webhook room), when the work needs "
             "another agent, call pulse_open_subsession with the agents you are "
             "allowed to call (never invent a profile), a title and a COMPLETE "
             "brief (they have not read the conversation). You take part in the "
