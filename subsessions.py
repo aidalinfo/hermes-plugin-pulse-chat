@@ -25,7 +25,7 @@ Quatre choix qui ne se devinent pas :
 - **Le canal n'est pas un parametre** (meme regle que ``pulse_request_approval``,
   ``pulse_podcast`` et les outils de coffre) : il vient de
   ``gateway.session_context``. Pour l'ouverture, c'est le fil en cours
-  (Tete-a-tete, canal, fil de tache, conversation privee — app > 0.70.0) ;
+  (Tete-a-tete, canal, fil de tache, conversation privee — app >= 0.71.0) ;
   pour le rapport, c'est la SOUS-SESSION en cours. Un parametre ferait du
   choix du canal une sortie de LLM.
 - **Aucune borne appliquee ici.** 1 a 5 agents, titre <= 120, consigne et
@@ -80,7 +80,7 @@ OPEN_TOOL_DESCRIPTION = (
     "fichiers passent par le coffre, partage avec la conversation : ecris-les "
     "avec pulse_vault_write et cite leur chemin dans la consigne. Tu PARTICIPES a "
     "la sous-session, et la personne peut y ecrire. Entre agents, on ne se parle "
-    "QUE par @mention (app > 0.70.0) : un message n'atteint un autre agent que "
+    "QUE par @mention (app >= 0.71.0) : un message n'atteint un autre agent que "
     "s'il le cite (@profil) ; pour relancer un agent, cite-le, et les autres te "
     "citent pour te rendre leur travail. N'ecris ni accuse de reception ni "
     "message de statut, et ne reponds pas a ceux des autres. Quand le travail est "
@@ -367,7 +367,7 @@ _ADVICE = {
     "subsession_not_allowed_here": (
         "Une sous-session ne s'ouvre que depuis une conversation que tu sers, "
         "jamais depuis une sous-session ni une salle de routine ou de webhook "
-        "(et, sur une app <= 0.70.0, seulement depuis un Tete-a-tete). Fais le "
+        "(et, sur une app < 0.71.0, seulement depuis un Tete-a-tete). Fais le "
         "travail toi-meme ici, ou dis a la personne que tu ne peux pas solliciter "
         "d'autre agent depuis cette conversation."
     ),
