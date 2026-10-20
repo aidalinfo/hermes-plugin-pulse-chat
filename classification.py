@@ -18,6 +18,8 @@ L'agent Hermes livre trois natures de contenu sur le meme canal :
 Regles (decision 3 du plan) :
 - ``is_edit=True``  => TOUJOURS ``tool_event`` (le tool progress arrive via
   ``edit_message`` — bulle initiale puis editions, upsert par message_id).
+- avis d'admission de la passerelle (message refuse, perdu, conversation en
+  pause — ``ADMISSION_NOTICE_PREFIXES``) => ``message`` : il s'adresse a l'humain.
 - prefixe reserve en debut de contenu => ``tool_event``.
 - motif tool-progress ``^<emoji court> <mot>...`` => ``tool_event``.
 - sinon => ``message``. En cas de doute => ``tool_event`` (jamais Message),
@@ -43,6 +45,23 @@ INTERIM_PREFIXES: tuple = (
     "✅",   # Background task complete
     "❌",   # Background task failed
     "💬",   # thinking relaye en tool progress
+)
+
+#: Avis d'ADMISSION de la passerelle : l'humain apprend que son message n'a PAS
+#: ete traite (refuse, perdu par file pleine, conversation en pause). Ils
+#: commencent par un emoji suivi d'un mot, donc la regle « emoji + mot » les
+#: rangeait en activite d'outil, masquee par defaut : refus, perte et pause
+#: devenaient invisibles. Textes d'Hermes ``gateway/session_ingress.py``
+#: (``admit_message``, ``QUEUE_FULL_REPLY``, ``pause_notice``), compares a
+#: PREFIXE, phrase comprise : l'emoji seul ne suffit pas. Les avis « ⏳ … your
+#: message is saved and will be answered … » restent des interims : le message
+#: est garde et sera repondu, comme « Queued ».
+ADMISSION_NOTICE_PREFIXES: tuple = (
+    "⚠️ Hermes refused this message",
+    "⚠ Hermes refused this message",
+    "⏳ Too many messages are already waiting in this conversation",
+    "⏸️ This conversation is paused",
+    "⏸ This conversation is paused",
 )
 
 #: Prefixe du rendu terminal (``💻 terminal\n```...````) — phase ``progress``.
@@ -161,11 +180,16 @@ def parse_tool(content: str) -> Dict[str, Optional[str]]:
     - sinon                    -> ``{"tool": None, "phase": None}`` (reponse normale)
 
     Une reponse reexpediee (``♻️ Recovered reply … :``) se classe sur son
-    CORPS, jamais sur son marqueur (``split_recovered_reply``).
+    CORPS, jamais sur son marqueur (``split_recovered_reply``). Un avis
+    d'admission de la passerelle (``ADMISSION_NOTICE_PREFIXES``) est une reponse.
 
     Fonction pure, sans dependance gateway.
     """
     content = split_recovered_reply(content)[1]
+
+    # Avis d'admission : avant les interims (``⏳``) et la regle emoji + mot.
+    if content.startswith(ADMISSION_NOTICE_PREFIXES):
+        return {"tool": None, "phase": None}
 
     # 💻 terminal\n```...``` — tool progress avec code fence.
     if content.startswith(TERMINAL_PREFIX):

@@ -260,3 +260,73 @@ def test_recovered_marker_without_body_stays_interim(content):
 def test_split_ignores_ordinary_text():
     assert split_recovered_reply(BODY) == (None, BODY)
     assert split_recovered_reply("") == (None, "")
+
+
+# ── Avis d'ADMISSION d'Hermes (« ton message n'a pas été pris ») ─────────────
+#
+# Depuis l'admission native (Hermes ``main`` d'octobre 2026,
+# ``gateway/session_ingress.py``), la passerelle répond elle-même à l'humain
+# quand son message n'est PAS traité. Ces avis commencent par un emoji suivi
+# d'un mot : la règle « emoji + mot » les rangeait en activité d'outil, masquée
+# par défaut, et l'humain ne savait jamais que son message était refusé, perdu
+# ou bloqué. Textes recopiés de ``session_ingress.py`` (main ``c5a3c0f876``).
+
+ADMISSION_NOTICES = [
+    # Refus à l'admission : rien n'est enregistré ni répondu.
+    (
+        "⚠️ Hermes refused this message (invalid_params), so it was not saved or "
+        "answered. Ask the operator to check gateway.log."
+    ),
+    (
+        "⚠️ Hermes refused this message (invalid_params: text), so it was not saved or "
+        "answered. Ask the operator to check gateway.log."
+    ),
+    # File pleine : rien n'est enregistré, il faut RENVOYER.
+    (
+        "⏳ Too many messages are already waiting in this conversation; "
+        "send this again after the current reply."
+    ),
+    # Conversation en pause : il faut AGIR (/discard ou /reset).
+    (
+        "⏸️ This conversation is paused: a previous turn did not finish when Hermes restarted, "
+        "and only you know whether to send it again. Your message is saved. Send /discard to drop "
+        "the lost turn and continue (it is not re-run), or /reset to start a fresh conversation."
+    ),
+    (
+        "⏸️ This conversation is paused: a queued message could not be re-authorized (permission_denied). "
+        "Your message is saved but will not be answered here. Send /reset to start a fresh "
+        "conversation, or ask the operator to resume this one."
+    ),
+    # Variantes sans variation selector.
+    "⚠ Hermes refused this message (invalid_params), so it was not saved or answered.",
+    "⏸ This conversation is paused: a queued message could not be re-authorized (x).",
+]
+
+
+@pytest.mark.parametrize("content", ADMISSION_NOTICES)
+def test_admission_notice_is_a_message(content):
+    assert classify_outbound(content, is_edit=False) == "message"
+    assert parse_tool(content) == {"tool": None, "phase": None}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        # Message ENREGISTRÉ et répondu plus tard : une attente, comme « Queued ».
+        "⏳ Hermes is restarting — your message is saved and will be answered when it is back.",
+        (
+            "⏳ Your message is saved and will be answered when the work running in this "
+            "conversation finishes."
+        ),
+        # Le préfixe seul ne suffit pas : il faut la phrase d'Hermes.
+        "⚠️ Hermes refused",
+        "⏸️ This conversation",
+    ],
+)
+def test_other_gateway_notices_keep_their_class(content):
+    assert classify_outbound(content, is_edit=False) == "tool_event"
+
+
+def test_admission_notice_edit_stays_tool_event():
+    # Une édition reste une édition (upsert par message_id), quel que soit son texte.
+    assert classify_outbound(ADMISSION_NOTICES[0], is_edit=True) == "tool_event"

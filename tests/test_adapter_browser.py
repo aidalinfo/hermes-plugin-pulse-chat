@@ -182,12 +182,11 @@ class TestRelance:
         assert len(dispatched) == 1
 
 
-class TestConfigAgent:
-    def test_le_tour_relance_emporte_la_config_du_dernier_message_du_canal(self):
-        """Ton, consignes et surtout `disabledTools` voyagent PAR MESSAGE : un
-        tour injecte sans eux utiliserait des outils que l'admin a retires."""
+class TestSansMetadata:
+    def test_le_tour_relance_ne_porte_aucune_metadata(self):
+        """Hermes ``main`` refuse a l'admission tout ``metadata`` hors WhatsApp :
+        un tour injecte qui en porterait serait refuse, et l'agent jamais relance."""
         adapter, dispatched = _adapter()
-        adapter._last_agent_config["compta"] = {"agentConfig": {"disabledTools": ["terminal"]}}
         _receive(adapter, _rendu("released", True))
         assert len(dispatched) == 1
-        assert dispatched[0].metadata == {"agentConfig": {"disabledTools": ["terminal"]}}
+        assert getattr(dispatched[0], "metadata", None) in (None, {})

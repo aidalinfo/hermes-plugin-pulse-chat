@@ -59,7 +59,10 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
   rejoue les messages non livrés de ces profils uniquement. Événements
   `message.created` → `MessageEvent` → agent, puis ack
   `{type: 'ack', messageId}` (le serveur marque `agentDeliveredAt` et rejoue
-  les messages non ackés à la reconnexion).
+  les messages non ackés à la reconnexion). Le `MessageEvent` ne porte
+  **aucun** `metadata` (1.19.2) : le bloc `agentConfig` de la trame (ton,
+  consignes, `disabledTools`) n'est lu par aucune version d'Hermes, et
+  l'admission native d'Hermes refuse tout `metadata` hors WhatsApp.
 - **plugin → app** : `POST <PULSE_CHAT_URL>/api/agent/messages`
   (header `Authorization: Bearer <PULSE_CHAT_TOKEN>`), body JSON
   `{channelSlug, kind, content, raw, hermesMessageId, tool, phase, replyToHermesId}`
@@ -72,6 +75,12 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
     classée sur son **corps**, qui est aussi ce que la bulle affiche ; le
     marqueur ne reste que dans `raw` (1.15.3 — avant, toute la réponse partait
     en `interim`, repliée sous « 1 activité d'outil ») ;
+  - **avis d'admission** de la passerelle (« ⚠️ Hermes refused this message… »,
+    « ⏳ Too many messages are already waiting… », « ⏸️ This conversation is
+    paused… ») ⇒ `message` : l'humain doit savoir que son message a été
+    refusé, perdu ou bloqué (1.19.2 — avant, emoji + mot les masquait en
+    activité d'outil). Les attentes « ⏳ … your message is saved » restent des
+    `interim` ;
   - préfixe réservé en début de contenu (⚡ ⏳ ⏩ ↪ ♻️ ♻ 🔄 ✅ ❌ 💬 💻)
     ⇒ `tool_event` phase `interim` ;
   - motif tool-progress `^<emoji court> <mot>…`
@@ -583,10 +592,8 @@ Ce qui ne se devine pas :
   interrompu ; `closed` et une trame sans `event` (app antérieure) n'injectent
   rien — le comportement d'avant. **Déployer l'app ≥ 0.39.0 AVANT** : c'est
   elle qui envoie ces champs, et sans eux la consigne de `pending` (« un
-  message te relancera aussi ») ne serait tenue que par l'humain. Le tour
-  injecté emporte le dernier `agentConfig` reçu dans le canal (ton,
-  consignes, `disabledTools`), et une nouvelle ouverture de session oublie le
-  `pending` du tour précédent (sinon un rendu en plein tour suivant
+  message te relancera aussi ») ne serait tenue que par l'humain. Une
+  nouvelle ouverture de session oublie le `pending` du tour précédent (sinon un rendu en plein tour suivant
   l'interromprait).
 - **Nom `pulse`, jamais `browser-use`** : Browser Use saute le fournisseur qui
   porte exactement ce nom.
@@ -762,6 +769,14 @@ stt:
   provider: mistral         # Voxtral Transcribe — même clé
   language: fr
 ```
+
+**Hermes construit depuis `main` après octobre 2026 (admission native) : plugin
+≥ 1.19.2 obligatoire.** L'admission native refuse tout `MessageEvent.metadata`
+hors WhatsApp (`Native admission refused: invalid_params (metadata)` dans le
+journal du bot), et les plugins antérieurs y posaient `agentConfig` à chaque
+message : **tous** les messages étaient refusés, sans rien d'affiché dans
+Pulse Chat (l'avis de refus partait en activité d'outil masquée). Les `v0.22.x`
+ne sont pas concernées.
 
 **Hermes ≥ v2026.9.24 : plugin ≥ 1.15.1 obligatoire.** Depuis cette version,
 Hermes applique `voice.auto_tts: true` à **tout** message, tapé compris : chaque
