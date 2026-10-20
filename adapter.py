@@ -398,26 +398,6 @@ def _warn_insecure_base_url(base_url: str) -> None:
     )
 
 
-def agent_config_metadata(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Bloc ``agentConfig`` de la frame, repris TEL QUEL (fonction pure).
-
-    L'app pousse dans chaque ``message.created`` la configuration comportementale
-    du profil (``tone``, ``autonomy``, ``instructions``, ``disabledTools``). Le
-    plugin TRANSPORTE ce bloc et ne l'interprete pas : aucune valeur n'est lue,
-    validee, renommee ni filtree ici — c'est Hermes qui decide quoi en faire. Un
-    champ ajoute plus tard cote app arrive donc jusqu'a l'agent sans toucher au
-    plugin.
-
-    Renvoie ``None`` quand la cle est absente ou n'est pas un objet : une app
-    anterieure a ce contrat continue de fonctionner a l'identique (aucune cle
-    ``metadata`` n'est alors posee sur l'evenement).
-    """
-    block = data.get("agentConfig")
-    if not isinstance(block, dict):
-        return None
-    return {"agentConfig": block}
-
-
 def session_token_from_ack(data: Dict[str, Any]) -> Optional[str]:
     """Jeton de session porte par une trame ``hello.ack`` (fonction pure).
 
@@ -432,39 +412,6 @@ def session_token_from_ack(data: Dict[str, Any]) -> Optional[str]:
         return None
     token = token.strip()
     return token or None
-
-
-def build_message_event(factory, kwargs: Dict[str, Any], metadata: Optional[Dict[str, Any]]):
-    """``MessageEvent`` porteur de ``metadata``, quelle que soit sa signature.
-
-    Le champ ``metadata`` n'existe pas forcement sur le ``MessageEvent`` de
-    toutes les versions d'Hermes (c'est une API interne — cf. 08-hermes-plugin).
-    On tente donc le mot-cle, puis on retombe sur l'attribut ; en dernier
-    recours l'evenement part sans son bloc plutot que de perdre le message.
-
-    Le repli est JOURNALISE (une seule fois, pour ne pas noyer les logs) : sur un
-    Hermes qui ne connait pas ce champ, la configuration voyagerait sur un
-    attribut que personne ne lit — exactement la panne silencieuse qu'on vient de
-    corriger, sous une autre forme. Sans cette trace, rien ne la signalerait.
-    """
-    if metadata is None:
-        return factory(**kwargs)
-    try:
-        return factory(metadata=metadata, **kwargs)
-    except TypeError:
-        _warn_once(
-            "metadata_kwarg",
-            "Pulse Chat: MessageEvent n'accepte pas 'metadata' — agentConfig "
-            "transporte en attribut ; verifier qu'Hermes le lit bien, sinon la "
-            "configuration de l'agent (ton, autonomie, consignes, outils) reste "
-            "sans effet.",
-        )
-        event = factory(**kwargs)
-        try:
-            setattr(event, "metadata", metadata)
-        except Exception as exc:  # dataclass figee, __slots__…
-            logger.warning("Pulse Chat: agentConfig non transportable — %s", exc)
-        return event
 
 
 def _ws_url(base_url: str) -> str:
@@ -572,11 +519,6 @@ class PulseChatAdapter(BasePlatformAdapter):
         self._credential_tasks: "set[asyncio.Task]" = set()
         # Derniere source par canal — cle de session d'une interruption.
         self._last_source: Dict[str, Any] = {}
-        # Dernier bloc ``agentConfig`` recu par canal : un tour INJECTE par le
-        # plugin (relance apres un rendu de main) n'a pas de trame d'origine, et
-        # partir sans lui priverait l'agent de son ton, de ses consignes et
-        # surtout de ``disabledTools`` — des outils que l'admin a retires.
-        self._last_agent_config: Dict[str, Optional[Dict[str, Any]]] = {}
         # Type du DERNIER message entrant par canal (True = VOICE). Lu par
         # `_should_auto_tts_for_chat` : l'auto-TTS d'Hermes ne doit parler QUE
         # quand l'humain a parle (cf. la methode).
@@ -1133,9 +1075,10 @@ class PulseChatAdapter(BasePlatformAdapter):
             user_id=str(message.get("userId")) if message.get("userId") else None,
             user_name=message.get("userName"),
         )
-        # Le bloc `agentConfig` de la frame est REPORTE dans l'evenement transmis
-        # a Hermes, sans interpretation : ton, autonomie, consignes et politique
-        # d'outils sont sans effet de bout en bout si le plugin les jette.
+        # AUCUN `metadata` sur l'evenement : Hermes ne lit pas le bloc
+        # `agentConfig` de la frame (aucune version), et l'admission native
+        # d'Hermes refuse tout `metadata` hors WhatsApp (`invalid_params
+        # (metadata)`) — le message ne serait jamais traite.
         # Note vocale : le type du message decide de DEUX comportements du
         # coeur Hermes que l'adaptateur ne peut pas obtenir autrement —
         # la transcription automatique de l'audio entrant, et l'auto-TTS de la
@@ -1146,21 +1089,16 @@ class PulseChatAdapter(BasePlatformAdapter):
         is_voice = str(message.get("messageType") or "").lower() == "voice" or any(
             is_audio_mime(mime) for mime in media_types
         )
-        event = build_message_event(
-            MessageEvent,
-            {
-                "text": message.get("text") or "",
-                "message_type": MessageType.VOICE if is_voice else MessageType.TEXT,
-                "source": source,
-                "message_id": str(message_id),
-                "media_urls": media_urls,
-                "media_types": media_types,
-            },
-            agent_config_metadata(data),
+        event = MessageEvent(
+            text=message.get("text") or "",
+            message_type=MessageType.VOICE if is_voice else MessageType.TEXT,
+            source=source,
+            message_id=str(message_id),
+            media_urls=media_urls,
+            media_types=media_types,
         )
 
         self._last_source[slug] = source
-        self._last_agent_config[slug] = agent_config_metadata(data)
         self._last_inbound_voice[slug] = is_voice
         await self.handle_message(event)
         self._remember_message_id(dedup_key)
@@ -2576,17 +2514,13 @@ class PulseChatAdapter(BasePlatformAdapter):
             reply["decidedBy"],
             user_id=reply.get("decidedById"),
         )
-        event = build_message_event(
-            MessageEvent,
-            {
-                "text": decision_message_text(reply),
-                "message_type": MessageType.TEXT,
-                "source": source,
-                "message_id": dedup_key,
-                "media_urls": [],
-                "media_types": [],
-            },
-            None,
+        event = MessageEvent(
+            text=decision_message_text(reply),
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id=dedup_key,
+            media_urls=[],
+            media_types=[],
         )
         self._remember_message_id(dedup_key)
         logger.info(
@@ -2683,17 +2617,13 @@ class PulseChatAdapter(BasePlatformAdapter):
         # hello pour cette trame), et deux rendus successifs doivent tous deux
         # relancer l'agent.
         message_id = f"browser:{notice['sessionId']}:{uuid.uuid4().hex[:12]}"
-        event = build_message_event(
-            MessageEvent,
-            {
-                "text": notice["text"],
-                "message_type": MessageType.TEXT,
-                "source": source,
-                "message_id": message_id,
-                "media_urls": [],
-                "media_types": [],
-            },
-            self._last_agent_config.get(slug),
+        event = MessageEvent(
+            text=notice["text"],
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id=message_id,
+            media_urls=[],
+            media_types=[],
         )
         self._remember_message_id(message_id)
         logger.info(

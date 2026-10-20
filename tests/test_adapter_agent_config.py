@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Transport du bloc ``agentConfig`` (app -> plugin -> Hermes).
+"""Le bloc ``agentConfig`` n'est PLUS transmis a Hermes (``MessageEvent.metadata``).
 
-Le serveur serialise `agentConfig` dans chaque frame ``message.created``
-(`server/lib/hermesGateway.ts`). L'adaptateur reconstruisait un ``MessageEvent``
-a partir de cles nommees et ne lisait jamais `data["agentConfig"]` : ton,
-autonomie, consignes et politique d'outils etaient sans effet de bout en bout.
-
-Doctrine verifiee ici : le plugin TRANSPORTE et n'INTERPRETE pas — le bloc est
-reporte tel quel, y compris ses champs inconnus.
+Le serveur serialise `agentConfig` dans chaque frame ``message.created``. Le
+plugin le recopiait dans ``MessageEvent.metadata`` en croyant qu'Hermes
+l'appliquait (ton, consignes, ``disabledTools``). Aucune version d'Hermes ne lit
+ce bloc (``v2026.9.24``, ``v0.22.2``, ``main`` d'octobre 2026), et Hermes
+``main`` REFUSE desormais a l'admission native tout message dont ``metadata``
+est non vide hors WhatsApp (``invalid_params (metadata)``) : tous les messages
+de Pulse Chat etaient refuses. Doctrine verifiee ici : aucun evenement transmis
+a Hermes ne porte de ``metadata``.
 
 Chargement identique a test_adapter_dedup.py : stubs ``gateway.*`` dans
 ``sys.modules`` puis chargement d'``adapter.py`` par chemin.
@@ -166,119 +167,34 @@ def _dispatch(frame):
     return seen[0]
 
 
-# --- Fonction pure -----------------------------------------------------------
-
-def test_agent_config_metadata_reports_block_verbatim():
-    assert adapter_module.agent_config_metadata(_frame(agentConfig=AGENT_CONFIG)) == {
-        "agentConfig": AGENT_CONFIG
-    }
-
-
-def test_agent_config_metadata_keeps_unknown_fields():
-    """Transporte, n'interprete pas : un champ ajoute cote app doit passer."""
-    block = dict(AGENT_CONFIG, futurReglage={"a": 1})
-    assert adapter_module.agent_config_metadata({"agentConfig": block}) == {
-        "agentConfig": block
-    }
-
-
-def test_agent_config_metadata_absent_or_invalid_gives_none():
-    assert adapter_module.agent_config_metadata(_frame()) is None
-    assert adapter_module.agent_config_metadata({"agentConfig": None}) is None
-    assert adapter_module.agent_config_metadata({"agentConfig": ["direct"]}) is None
-
-
 # --- Chemin complet ----------------------------------------------------------
 
-def test_message_event_carries_agent_config():
+def _no_metadata(event):
+    """Aucun ``metadata`` pose : le stub ne garde que les champs transmis."""
+    return getattr(event, "metadata", None) in (None, {})
+
+
+def test_message_event_never_carries_agent_config():
     event = _dispatch(_frame(agentConfig=AGENT_CONFIG))
-    assert event.metadata == {"agentConfig": AGENT_CONFIG}
+    assert _no_metadata(event)
     # Le reste de la traduction est inchange.
     assert event.text == "bonjour"
     assert event.message_id == "msg-1"
 
 
+def test_unknown_agent_config_fields_are_not_forwarded_either():
+    event = _dispatch(_frame(agentConfig=dict(AGENT_CONFIG, futurReglage={"a": 1})))
+    assert _no_metadata(event)
+
+
 def test_frame_without_agent_config_sets_no_metadata():
-    """Compat : une app anterieure au contrat ne pose aucune cle `metadata`."""
     event = _dispatch(_frame())
-    assert not hasattr(event, "metadata")
+    assert _no_metadata(event)
 
 
-def test_message_event_without_metadata_kwarg_still_carries_block(caplog):
-    """MessageEvent d'une version d'Hermes sans champ `metadata` : repli attribut.
-
-    Le repli doit LAISSER UNE TRACE : sans elle, la configuration voyagerait sur
-    un attribut qu'Hermes ne lit pas, sans que personne ne le sache.
-    """
-    adapter_module._WARNED_ONCE.clear()
-
-    class LegacyMessageEvent:
-        def __init__(self, text, message_type, source, message_id, media_urls, media_types):
-            self.text = text
-            self.message_id = message_id
-
-    event = adapter_module.build_message_event(
-        LegacyMessageEvent,
-        {
-            "text": "bonjour",
-            "message_type": "text",
-            "source": {},
-            "message_id": "msg-1",
-            "media_urls": [],
-            "media_types": [],
-        },
-        {"agentConfig": AGENT_CONFIG},
-    )
-    assert event.metadata == {"agentConfig": AGENT_CONFIG}
-    assert any("metadata" in r.message for r in caplog.records if r.levelname == "WARNING")
-
-
-def test_metadata_fallback_warns_only_once(caplog):
-    """Une degradation structurelle se repete a chaque message : une trace suffit."""
-
-    class LegacyMessageEvent:
-        def __init__(self, text, message_type, source, message_id, media_urls, media_types):
-            self.message_id = message_id
-
-    adapter_module._WARNED_ONCE.clear()
-    kwargs = {
-        "text": "bonjour",
-        "message_type": "text",
-        "source": {},
-        "message_id": "msg-1",
-        "media_urls": [],
-        "media_types": [],
-    }
-    for _ in range(3):
-        adapter_module.build_message_event(
-            LegacyMessageEvent, dict(kwargs), {"agentConfig": AGENT_CONFIG}
-        )
-
-    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert len(warnings) == 1, "un seul avertissement attendu pour trois messages"
-
-
-def test_message_is_never_lost_when_block_cannot_be_attached():
-    """Un evenement qui refuse `metadata` part quand meme — le message prime."""
-
-    class FrozenMessageEvent:
-        __slots__ = ("text", "message_id")
-
-        def __init__(self, text, message_type, source, message_id, media_urls, media_types):
-            self.text = text
-            self.message_id = message_id
-
-    event = adapter_module.build_message_event(
-        FrozenMessageEvent,
-        {
-            "text": "bonjour",
-            "message_type": "text",
-            "source": {},
-            "message_id": "msg-1",
-            "media_urls": [],
-            "media_types": [],
-        },
-        {"agentConfig": AGENT_CONFIG},
-    )
-    assert event.message_id == "msg-1"
-    assert not hasattr(event, "metadata")
+def test_metadata_transport_helpers_are_gone():
+    """Le transport n'existe plus : rien ne doit pouvoir le reposer par megarde."""
+    for name in ("build_message_event", "agent_config_metadata"):
+        assert not hasattr(adapter_module, name), name
+    adapter, _ = _make_adapter()
+    assert not hasattr(adapter, "_last_agent_config")

@@ -195,6 +195,8 @@ class TestDecisionTardive:
         assert event.source["chat_id"] == "compta"
         assert "APPROUVE" in event.text
         assert "Plan d'extraction" in event.text
+        # Hermes ``main`` refuse a l'admission tout ``metadata`` hors WhatsApp.
+        assert getattr(event, "metadata", None) in (None, {})
 
     def test_bot_redemarre_la_source_porte_le_decideur(self):
         """Bot redemarre : aucune ``_last_source``. Hermes JETTE en silence un
