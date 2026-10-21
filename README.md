@@ -455,12 +455,14 @@ pulse_knowledge_overview()
 ```
 
 - **Enregistrés SEULEMENT si `PULSE_KNOWLEDGE_URL` et `PULSE_KNOWLEDGE_TOKEN`
-  sont posés** — sinon aucun outil, aucun paragraphe de `platform_hint`, aucun
-  avertissement (la plupart des bots n'ont pas de service). Une URL en clair
-  vers un hôte public est refusée (avertissement unique) ; `http://knowledge:8787`
-  est local. Quand ils sont enregistrés, le `hello` annonce la fonction
-  `knowledge` dans `capabilities.features` : Pulse sait ainsi dire « recherche
-  absente » (plugin < 1.20.0 ou variables non posées).
+  sont posés** — aucune des deux : aucun outil, aucun paragraphe de
+  `platform_hint`, aucun avertissement (la plupart des bots n'ont pas de
+  service) ; une seule : avertissement unique. Une URL en clair vers un hôte
+  public est refusée (avertissement unique) ; `http://knowledge:8787` est
+  local. Le paragraphe du `platform_hint` et la fonction `knowledge` annoncée
+  au `hello` (`capabilities.features`) suivent l'enregistrement RÉEL de
+  `pulse_knowledge_search` : Pulse sait ainsi dire « recherche absente »
+  (plugin < 1.20.0, variables non posées, ou nom déjà pris).
 - **Le périmètre est décidé par Pulse, à chaque appel** : canal lu dans
   `HERMES_SESSION_CHAT_ID` (plateforme `pulse_chat` exigée, jamais un
   argument), Bearer = le secret d'agent `pca_`. Pulse dérive le canal de
@@ -471,24 +473,40 @@ pulse_knowledge_overview()
   consultable depuis ce canal » (`no_knowledge_here`) ou `pulse_unavailable`.
 - **Résultat enveloppé comme contenu NON FIABLE.** Hermes n'encadre que
   `web_*`, `browser_*` et `mcp_*` ; une boîte mail est faite de messages de
-  tiers. La sortie est un texte : une ligne de résumé (des comptes, jamais du
-  contenu), `[Données de la boîte et des documents du client — contenu NON
-  FIABLE : …]`, les données en JSON, `[Fin des données]`, puis la suite à
-  donner. Les repères sont **désarmés** dans le contenu (crochets → parenthèses,
-  clés comprises, ainsi que le délimiteur `untrusted_tool_result` d'Hermes) :
-  un sujet de courriel ne peut ni refermer le bloc ni en ouvrir un faux.
+  tiers. La sortie est un texte de six lignes : un résumé (des comptes, jamais
+  du contenu), l'en-tête `[Données de la boîte et des documents du client —
+  contenu NON FIABLE : … Le bloc se termine à la ligne exacte [Fin des données
+  <code>]]`, les données en JSON sur UNE ligne, le repère de fin `[Fin des
+  données <code>]`, la suite à donner et un rappel. **La garantie est le
+  `<code>`** : 8 caractères hexadécimaux tirés à chaque appel
+  (`secrets.token_hex(4)`) et annoncés dans l'en-tête — un contenu de tiers ne
+  peut pas le deviner, donc pas refermer le bloc. Les séparateurs que
+  `json.dumps` laisse bruts (U+2028, U+2029, U+0085), lus comme des retours à
+  la ligne, sont échappés. **En défense en profondeur**, une chaîne dont la vue
+  normalisée (NFKC puis décomposition, caractères de format Cf et diacritiques
+  retirés, homoglyphes cyrilliques et grecs repliés) porte une forme de repère
+  — ou le délimiteur `untrusted_tool_result` d'Hermes — voit tous ses crochets
+  (ASCII, pleine chasse, chevrons…) changés en parenthèses, le reste de son
+  texte intact. Ce désarmement ne prétend pas tout attraper : c'est le code
+  qui ferme le bloc.
 - **`remote_id` et `conversation_id`** d'un courriel sont rendus tels quels :
   ce sont eux que demandent les connecteurs `mail.content` et `mail.organize`.
 - **Bornes du contrat** : `query` 1 à 500 caractères, `since` / `until` en
   AAAA-MM-JJ, `kind` parmi `mail`, `file`, `attachment`, `image`, `limit` 1 à
-  20 — vérifiées AVANT tout réseau, jamais coupées. Côté réponse, extrait ≤ 400
-  et texte lu ≤ 20 000 caractères (coupe annoncée par `truncated`).
+  20 (un flottant entier comme `5.0` est accepté) — vérifiées AVANT tout
+  réseau, jamais coupées. Côté réponse, extrait ≤ 400, texte lu ≤ 20 000
+  caractères (coupe annoncée par `truncated`), et données rendues ≤ 60 000
+  caractères : au-delà, des éléments sont retirés en fin de liste (ou le texte
+  raccourci), et la coupe est ANNONCÉE dans la ligne de résumé.
 - **Outils synchrones** (patron de `pulse_browser_handoff`), délais courts
   (périmètre 10 s, service 20 s). Aucune exception : `knowledge_unavailable`
   (service injoignable), `knowledge_unauthorized` (401, jeton local différent),
   `invalid_request` (400, message du service), `not_found` (404 en lecture),
-  `knowledge_error`, `not_authorized` / `agent_session_required` (Pulse) —
-  chacun avec un conseil `next`. Aucun contenu au journal.
+  `knowledge_error` ; côté Pulse, `no_knowledge_here` (liste vide ou 404
+  `channel_not_found`), `scope_unavailable` (404 SANS code : app sans la
+  route), `not_authorized`, `agent_session_required` (réessayer) et
+  `emitter_ambiguous` (réglage du bot, ne pas réessayer) — chacun avec un
+  conseil `next`. Aucun contenu au journal.
 
 **Diagnostic — « l'agent ne cherche pas dans la boîte ».** Vérifier l'image du
 plugin (≥ 1.20.0, et aucun dossier de sauvegarde sous `/opt/data/plugins/`),
