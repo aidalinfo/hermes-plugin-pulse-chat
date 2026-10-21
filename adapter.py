@@ -3467,7 +3467,16 @@ def _knowledge_settings() -> Optional[Tuple[str, str]]:
     """
     url = str(_get_secret(KNOWLEDGE_URL_ENV) or "").strip()
     token = str(_get_secret(KNOWLEDGE_TOKEN_ENV) or "").strip()
+    if not url and not token:
+        return None
     if not url or not token:
+        # Une seule des deux : configuration a moitie posee, a dire (une fois).
+        _warn_once(
+            "knowledge_half_configured",
+            f"Pulse Chat: {KNOWLEDGE_URL_ENV} et {KNOWLEDGE_TOKEN_ENV} vont ensemble — "
+            f"{KNOWLEDGE_TOKEN_ENV if url else KNOWLEDGE_URL_ENV} manque, outils de "
+            "connaissance non enregistres.",
+        )
         return None
     if not transport_allowed(url):
         _warn_once(
@@ -3603,9 +3612,10 @@ def _pulse_knowledge_overview(args: Dict[str, Any], **_kwargs: Any) -> str:
 
 
 def _knowledge_hint() -> str:
-    """Le paragraphe de ``platform_hint``, SEULEMENT si les outils existent
-    (evalue une fois, a l'enregistrement — patron de ``_browser_hint``)."""
-    return "\n\n" + KNOWLEDGE_HINT if _knowledge_settings() is not None else ""
+    """Le paragraphe de ``platform_hint``, SEULEMENT si la recherche a ete
+    REELLEMENT enregistree (``_register_knowledge_tools`` passe avant la
+    construction de l'entree de plateforme)."""
+    return "\n\n" + KNOWLEDGE_HINT if _KNOWLEDGE_TOOLS_REGISTERED else ""
 
 
 def _register_knowledge_tools(ctx) -> None:
@@ -3614,7 +3624,12 @@ def _register_knowledge_tools(ctx) -> None:
     Chacun isole : l'echec de l'un n'empeche ni les autres, ni la plateforme."""
     global _KNOWLEDGE_TOOLS_REGISTERED
     _KNOWLEDGE_TOOLS_REGISTERED = False
-    if _knowledge_settings() is None:
+    try:
+        settings = _knowledge_settings()
+    except Exception as exc:
+        _warn_once("knowledge_settings_failed", f"Pulse Chat: configuration de connaissance illisible — {exc}")
+        return
+    if settings is None:
         logger.debug("Pulse Chat: pas de service de connaissance — outils non enregistres")
         return
     for name, schema, handler, description, emoji, key in (
@@ -3666,7 +3681,9 @@ def _register_knowledge_tools(ctx) -> None:
                     f"{key}_tool_shadowed",
                     f"Pulse Chat: l'outil {name} n'a pas ete enregistre (nom deja pris ?)",
                 )
-            else:
+            elif name == KNOWLEDGE_SEARCH_TOOL_NAME:
+                # La fonction annoncee (et le hint) suivent la RECHERCHE : sans
+                # elle, les trois autres ne disent pas quoi lire.
                 _KNOWLEDGE_TOOLS_REGISTERED = True
         except Exception as exc:
             _warn_once(f"{key}_tool_failed", f"Pulse Chat: outil {name} non enregistre — {exc}")
@@ -3674,6 +3691,9 @@ def _register_knowledge_tools(ctx) -> None:
 
 def register(ctx):
     """Point d'entree plugin : appele par le systeme de plugins Hermes."""
+    # AVANT l'entree de plateforme : son ``platform_hint`` ne nomme les outils
+    # de connaissance que s'ils sont REELLEMENT enregistres.
+    _register_knowledge_tools(ctx)
     entry = dict(
         name="pulse_chat",
         label="Pulse Chat",
@@ -3785,7 +3805,6 @@ def register(ctx):
     _register_workspace_tools(ctx)
     _register_podcast_tool(ctx)
     _register_subsession_tools(ctx)
-    _register_knowledge_tools(ctx)
     _register_guide_skill(ctx)
     _register_browser(ctx)
     _register_todo_hook(ctx)

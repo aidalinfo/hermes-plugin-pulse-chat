@@ -16,6 +16,7 @@ Ce qui est verifie ici, et chaque point est un mode d'echec MUET :
 
 import asyncio
 import json
+import re
 import socket
 import sys
 import threading
@@ -140,7 +141,11 @@ class _Ctx:
 
 class TestEnregistrement:
     def test_rien_sans_les_deux_variables(self, monkeypatch):
-        for env in ({}, {"PULSE_KNOWLEDGE_URL": "http://knowledge:8787"}, {"PULSE_KNOWLEDGE_TOKEN": "t"}):
+        for env, expected_warning in (
+            ({}, False),
+            ({"PULSE_KNOWLEDGE_URL": "http://knowledge:8787"}, True),
+            ({"PULSE_KNOWLEDGE_TOKEN": "t"}, True),
+        ):
             monkeypatch.delenv("PULSE_KNOWLEDGE_URL", raising=False)
             monkeypatch.delenv("PULSE_KNOWLEDGE_TOKEN", raising=False)
             for key, value in env.items():
@@ -151,7 +156,9 @@ class TestEnregistrement:
             adapter_module.register(ctx)
             assert not KNOWLEDGE_TOOLS & set(ctx.tools), env
             assert "pulse_knowledge" not in ctx.platform["platform_hint"]
-            assert not [k for k in warned if "knowledge" in k], env  # aucun bruit
+            # Aucune variable : aucun bruit. Une seule : dit une fois.
+            assert ("knowledge_half_configured" in warned) is expected_warning, env
+            assert [k for k in warned if "knowledge" in k] in ([], ["knowledge_half_configured"]), env
             assert adapter_module._KNOWLEDGE_TOOLS_REGISTERED is False
             # Les autres outils sont la.
             assert "pulse_podcast" in ctx.tools
@@ -181,6 +188,28 @@ class TestEnregistrement:
         adapter_module.register(ctx)
         assert not KNOWLEDGE_TOOLS & set(ctx.tools)
         assert "knowledge_transport_refused" in warned
+
+    def test_sans_la_recherche_ni_hint_ni_annonce(self, monkeypatch):
+        _configure(monkeypatch)
+        monkeypatch.setattr(adapter_module, "_warn_once", lambda key, msg: None)
+        ctx = _Ctx(shadow="pulse_knowledge_search")
+        adapter_module.register(ctx)
+        assert "pulse_knowledge_read" in ctx.tools
+        assert adapter_module._KNOWLEDGE_TOOLS_REGISTERED is False
+        assert "pulse_knowledge" not in ctx.platform["platform_hint"]
+
+    def test_configuration_illisible_nempeche_pas_la_plateforme(self, monkeypatch):
+        def boom(name, default=None):
+            raise RuntimeError("magasin de secrets en panne")
+
+        monkeypatch.setattr(adapter_module, "_knowledge_settings", lambda: boom("x"))
+        warned = []
+        monkeypatch.setattr(adapter_module, "_warn_once", lambda key, msg: warned.append(key))
+        ctx = _Ctx()
+        adapter_module.register(ctx)
+        assert ctx.platform is not None
+        assert "knowledge_settings_failed" in warned
+        assert not KNOWLEDGE_TOOLS & set(ctx.tools)
 
     def test_un_nom_deja_pris_est_signale_et_isole(self, monkeypatch):
         _configure(monkeypatch)
@@ -240,10 +269,12 @@ class TestAppel:
             "sources": ["mail-1", "drive-1"],
         }
         # 3. Enveloppe non fiable, contenu desarme, identifiants rendus.
-        lines = out.split("\n")
-        assert lines[1] == knowledge.UNTRUSTED_HEADER
-        assert lines[3] == knowledge.UNTRUSTED_FOOTER
-        assert out.count("[Fin des données") == 1
+        lines = out.splitlines()
+        assert len(lines) == 6
+        assert lines[1].startswith("[Données de la boîte et des documents du client")
+        assert re.fullmatch(r"\[Fin des données [0-9a-f]{8}\]", lines[3])
+        assert lines[1].endswith(lines[3] + "]")
+        assert "[Fin des données]" not in out
         item = json.loads(lines[2])["results"][0]
         assert item["remote_id"] == "AAMkAGI2TG93AAA="
         assert item["conversation_id"] == "AAQkAGI2conv="
@@ -261,7 +292,7 @@ class TestAppel:
         assert service.requests[0]["body"] == {"ref": "r-1", "sources": ["mail-1", "drive-1"]}
         assert service.requests[1]["body"] == {"query": "Dupont", "sources": ["mail-1", "drive-1"]}
         assert service.requests[2]["body"] == {"sources": ["mail-1", "drive-1"]}
-        assert knowledge.UNTRUSTED_HEADER in out
+        assert "contenu NON FIABLE" in out
 
     def test_perimetre_vide_ou_404_naappelle_pas_le_service(self, monkeypatch):
         for scope in ((200, {"sources": []}), (404, {"data": {"code": "channel_not_found"}})):
@@ -273,6 +304,14 @@ class TestAppel:
             assert out["status"] == "refused"
             assert out["code"] == "no_knowledge_here"
             assert out["message"] == "Aucune connaissance consultable depuis ce canal"
+
+    def test_pulse_sans_la_route(self, monkeypatch):
+        with _Service() as service:
+            _configure(monkeypatch, url=service.url)
+            _adapter(monkeypatch, scope=(404, {"statusCode": 404, "statusMessage": "Page not found"}))
+            out = json.loads(adapter_module._pulse_knowledge_search({"query": "devis"}))
+        assert service.requests == []
+        assert out["code"] == "scope_unavailable"
 
     def test_pulse_injoignable_ferme(self, monkeypatch):
         with _Service() as service:
