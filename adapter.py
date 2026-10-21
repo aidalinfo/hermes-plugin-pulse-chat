@@ -108,6 +108,34 @@ from .connectors import (
     connector_url,
     parse_connector_error,
 )
+from .knowledge import (
+    KNOWLEDGE_FEATURE,
+    KNOWLEDGE_HINT,
+    KNOWLEDGE_TOKEN_ENV,
+    KNOWLEDGE_URL_ENV,
+    MAX_RESPONSE_BYTES as KNOWLEDGE_MAX_RESPONSE_BYTES,
+    OVERVIEW_TOOL_DESCRIPTION as KNOWLEDGE_OVERVIEW_DESCRIPTION,
+    OVERVIEW_TOOL_NAME as KNOWLEDGE_OVERVIEW_TOOL_NAME,
+    OVERVIEW_TOOL_SCHEMA as KNOWLEDGE_OVERVIEW_SCHEMA,
+    PEOPLE_TOOL_DESCRIPTION as KNOWLEDGE_PEOPLE_DESCRIPTION,
+    PEOPLE_TOOL_NAME as KNOWLEDGE_PEOPLE_TOOL_NAME,
+    PEOPLE_TOOL_SCHEMA as KNOWLEDGE_PEOPLE_SCHEMA,
+    READ_TOOL_DESCRIPTION as KNOWLEDGE_READ_DESCRIPTION,
+    READ_TOOL_NAME as KNOWLEDGE_READ_TOOL_NAME,
+    READ_TOOL_SCHEMA as KNOWLEDGE_READ_SCHEMA,
+    SCOPE_TIMEOUT_SECONDS as KNOWLEDGE_SCOPE_TIMEOUT,
+    SEARCH_TOOL_DESCRIPTION as KNOWLEDGE_SEARCH_DESCRIPTION,
+    SEARCH_TOOL_NAME as KNOWLEDGE_SEARCH_TOOL_NAME,
+    SEARCH_TOOL_SCHEMA as KNOWLEDGE_SEARCH_SCHEMA,
+    SERVICE_TIMEOUT_SECONDS as KNOWLEDGE_SERVICE_TIMEOUT,
+    build_payload as build_knowledge_payload,
+    parse_scope as parse_knowledge_scope,
+    refused_result as knowledge_refused,
+    scope_url as knowledge_scope_url,
+    service_refusal as knowledge_service_refusal,
+    service_url as knowledge_service_url,
+    success_result as knowledge_success,
+)
 from .podcast import (
     PODCAST_TOOL_DESCRIPTION,
     PODCAST_TOOL_NAME,
@@ -765,6 +793,17 @@ class PulseChatAdapter(BasePlatformAdapter):
             features = [f for f in capabilities.get("features") or [] if isinstance(f, str)]
             if credentials_relay.CREDENTIALS_FEATURE not in features:
                 features.append(credentials_relay.CREDENTIALS_FEATURE)
+            capabilities["features"] = features
+
+        # Connaissance du client (Bot Factory) : annoncee SEULEMENT quand les
+        # outils ont ete enregistres — Pulse sait alors dire « recherche
+        # absente » a qui attend un bot qui connait son client (image du plugin
+        # en retard, ou variables PULSE_KNOWLEDGE_* non posees).
+        if _KNOWLEDGE_TOOLS_REGISTERED:
+            capabilities = dict(capabilities or {})
+            features = [f for f in capabilities.get("features") or [] if isinstance(f, str)]
+            if KNOWLEDGE_FEATURE not in features:
+                features.append(KNOWLEDGE_FEATURE)
             capabilities["features"] = features
 
         # Frame hello AVANT la boucle de reception : le serveur enregistre le
@@ -3405,8 +3444,256 @@ def _register_browser(ctx) -> None:
         )
 
 
+# ── Connaissance du client (Bot Factory) ─────────────────────────────────
+#
+# Quatre outils SYNCHRONES (patron de ``pulse_browser_handoff``) : HTTP
+# bloquant dans le fil d'outil, ou les ``ContextVar`` de session sont
+# propagees — aucune boucle a emprunter. Chaque appel demande d'abord a
+# Pulse le PERIMETRE du canal courant (§ 4.6), puis interroge le service
+# local avec ces sources seulement (§ 4.9). Cf. docstring de ``knowledge.py``.
+
+#: Les outils de connaissance ont-ils ete enregistres ? Decide l'annonce de la
+#: fonction ``knowledge`` au ``hello``. Reecrit a chaque ``register``.
+_KNOWLEDGE_TOOLS_REGISTERED = False
+
+
+def _knowledge_settings() -> Optional[Tuple[str, str]]:
+    """``(url, jeton)`` du service local, ou ``None`` — lecture de
+    configuration seulement, aucun reseau.
+
+    Les DEUX variables sont exigees ; une URL dont le transport ne peut pas
+    porter le jeton (clair vers un hote public) est refusee et le dit, une
+    fois. Absentes, silence : la plupart des bots n'ont pas de service.
+    """
+    url = str(_get_secret(KNOWLEDGE_URL_ENV) or "").strip()
+    token = str(_get_secret(KNOWLEDGE_TOKEN_ENV) or "").strip()
+    if not url and not token:
+        return None
+    if not url or not token:
+        # Une seule des deux : configuration a moitie posee, a dire (une fois).
+        _warn_once(
+            "knowledge_half_configured",
+            f"Pulse Chat: {KNOWLEDGE_URL_ENV} et {KNOWLEDGE_TOKEN_ENV} vont ensemble — "
+            f"{KNOWLEDGE_TOKEN_ENV if url else KNOWLEDGE_URL_ENV} manque, outils de "
+            "connaissance non enregistres.",
+        )
+        return None
+    if not transport_allowed(url):
+        _warn_once(
+            "knowledge_transport_refused",
+            f"Pulse Chat: {KNOWLEDGE_URL_ENV} en clair vers un hote public "
+            f"({redact_url(url)}) — outils de connaissance non enregistres "
+            "(le jeton partirait sans chiffrement).",
+        )
+        return None
+    return url, token
+
+
+def _knowledge_adapter() -> Optional["PulseChatAdapter"]:
+    """Adaptateur qui porte l'appel du perimetre : le connecte de preference
+    (son jeton de session dit a l'app quel agent parle), sinon tout
+    adaptateur configure — meme regle que le navigateur."""
+    return _browser_adapter()
+
+
+def _knowledge_service_call(
+    url: str, token: str, operation: str, payload: Dict[str, Any]
+) -> Tuple[int, Any]:
+    """POST au service local — ``(statut, corps JSON ou None)``, jamais
+    d'exception (statut ``0`` = injoignable). Aucun contenu au journal."""
+    request = urllib.request.Request(
+        knowledge_service_url(url, operation),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with _urlopen(request, timeout=KNOWLEDGE_SERVICE_TIMEOUT) as response:
+            raw = response.read(KNOWLEDGE_MAX_RESPONSE_BYTES + 1)
+            status = int(response.status)
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        try:
+            raw = exc.read(KNOWLEDGE_MAX_RESPONSE_BYTES + 1)
+        except Exception:
+            raw = b""
+        logger.warning("Pulse Chat: service de connaissance /v1/%s -> HTTP %s", operation, status)
+    except Exception as exc:
+        logger.warning(
+            "Pulse Chat: service de connaissance injoignable (%s) — %s",
+            redact_url(url),
+            type(exc).__name__,
+        )
+        return 0, None
+    if len(raw) > KNOWLEDGE_MAX_RESPONSE_BYTES:
+        logger.warning("Pulse Chat: reponse du service de connaissance trop lourde — ignoree")
+        return 502, None
+    try:
+        parsed = json.loads(raw.decode("utf-8")) if raw else None
+    except (UnicodeDecodeError, ValueError):
+        parsed = None
+    return status, parsed
+
+
+def _run_knowledge_tool(operation: str, args: Any) -> str:
+    """Corps commun des quatre outils — rend TOUJOURS une chaine.
+
+    Ordre, et chaque etape est fermee par defaut : conversation Pulse Chat
+    (le canal vient du contexte de session, jamais d'un argument), arguments
+    (refus sans reseau), configuration, perimetre par Pulse (aucune source ⇒
+    le service n'est pas appele), service local, enveloppe non fiable.
+    """
+    try:
+        platform = _browser_session_env("HERMES_SESSION_PLATFORM").strip().lower()
+        chat_id = _browser_session_env("HERMES_SESSION_CHAT_ID").strip()
+        # STRICT : une plateforme vide ne prouve pas qu'on parle a Pulse Chat
+        # (CLI, cron) — meme regle que la carte de plan (``_forward_todo_plan``).
+        if platform != "pulse_chat" or not chat_id:
+            return knowledge_refused("no_channel", "Aucune conversation Pulse Chat en cours")
+        payload, error = build_knowledge_payload(operation, args)
+        if payload is None:
+            return knowledge_refused("invalid_request", error or "Parametres invalides")
+        settings = _knowledge_settings()
+        if settings is None:
+            return knowledge_refused(
+                "knowledge_unavailable", "Service de connaissance non configure sur ce bot"
+            )
+        adapter = _knowledge_adapter()
+        if adapter is None or not getattr(adapter, "base_url", ""):
+            return knowledge_refused("pulse_unavailable", "Pulse Chat injoignable (aucun adaptateur actif)")
+        # Le Bearer du perimetre est le secret d'agent (pca_) quand il est pose :
+        # la route exige une identite. Sur un bot de la Bot Factory, il est aussi
+        # PULSE_CHAT_TOKEN — la requete est alors celle de tout appel du plugin.
+        bearer = getattr(adapter, "agent_token", "") or getattr(adapter, "token", "")
+        status, body = adapter._http_detailed(
+            "GET",
+            knowledge_scope_url(adapter.base_url, chat_id),
+            headers={"Authorization": f"Bearer {bearer}", "Accept": "application/json"},
+            timeout=KNOWLEDGE_SCOPE_TIMEOUT,
+        )
+        sources, code, message = parse_knowledge_scope(status, body)
+        if sources is None:
+            return knowledge_refused(code, message)
+        url, token = settings
+        payload["sources"] = sources
+        status, body = _knowledge_service_call(url, token, operation, payload)
+        if 200 <= status < 300 and isinstance(body, dict):
+            return knowledge_success(operation, body)
+        return knowledge_service_refusal(operation, status, body)
+    except Exception as exc:
+        # Filet : un outil qui leve ferait croire au modele a une panne d'outil
+        # sans motif. Aucun contenu dans le journal, le type seul.
+        logger.warning("Pulse Chat: outil de connaissance %s en echec — %s", operation, type(exc).__name__)
+        return knowledge_refused("not_sent", "Erreur interne du plugin")
+
+
+def _pulse_knowledge_search(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Handler de ``pulse_knowledge_search``."""
+    return _run_knowledge_tool("search", args)
+
+
+def _pulse_knowledge_read(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Handler de ``pulse_knowledge_read``."""
+    return _run_knowledge_tool("read", args)
+
+
+def _pulse_knowledge_people(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Handler de ``pulse_knowledge_people``."""
+    return _run_knowledge_tool("people", args)
+
+
+def _pulse_knowledge_overview(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Handler de ``pulse_knowledge_overview``."""
+    return _run_knowledge_tool("overview", args)
+
+
+def _knowledge_hint() -> str:
+    """Le paragraphe de ``platform_hint``, SEULEMENT si la recherche a ete
+    REELLEMENT enregistree (``_register_knowledge_tools`` passe avant la
+    construction de l'entree de plateforme)."""
+    return "\n\n" + KNOWLEDGE_HINT if _KNOWLEDGE_TOOLS_REGISTERED else ""
+
+
+def _register_knowledge_tools(ctx) -> None:
+    """Outils de connaissance, SEULEMENT si ``PULSE_KNOWLEDGE_URL`` et
+    ``PULSE_KNOWLEDGE_TOKEN`` sont poses — sinon aucun outil, aucun bruit.
+    Chacun isole : l'echec de l'un n'empeche ni les autres, ni la plateforme."""
+    global _KNOWLEDGE_TOOLS_REGISTERED
+    _KNOWLEDGE_TOOLS_REGISTERED = False
+    try:
+        settings = _knowledge_settings()
+    except Exception as exc:
+        _warn_once("knowledge_settings_failed", f"Pulse Chat: configuration de connaissance illisible — {exc}")
+        return
+    if settings is None:
+        logger.debug("Pulse Chat: pas de service de connaissance — outils non enregistres")
+        return
+    for name, schema, handler, description, emoji, key in (
+        (
+            KNOWLEDGE_SEARCH_TOOL_NAME,
+            KNOWLEDGE_SEARCH_SCHEMA,
+            _pulse_knowledge_search,
+            KNOWLEDGE_SEARCH_DESCRIPTION,
+            "🔎",
+            "knowledge_search",
+        ),
+        (
+            KNOWLEDGE_READ_TOOL_NAME,
+            KNOWLEDGE_READ_SCHEMA,
+            _pulse_knowledge_read,
+            KNOWLEDGE_READ_DESCRIPTION,
+            "📄",
+            "knowledge_read",
+        ),
+        (
+            KNOWLEDGE_PEOPLE_TOOL_NAME,
+            KNOWLEDGE_PEOPLE_SCHEMA,
+            _pulse_knowledge_people,
+            KNOWLEDGE_PEOPLE_DESCRIPTION,
+            "👥",
+            "knowledge_people",
+        ),
+        (
+            KNOWLEDGE_OVERVIEW_TOOL_NAME,
+            KNOWLEDGE_OVERVIEW_SCHEMA,
+            _pulse_knowledge_overview,
+            KNOWLEDGE_OVERVIEW_DESCRIPTION,
+            "🗂️",
+            "knowledge_overview",
+        ),
+    ):
+        try:
+            registered = ctx.register_tool(
+                name=name,
+                toolset="pulse_chat",
+                schema=schema,
+                handler=handler,
+                is_async=False,
+                description=description,
+                emoji=emoji,
+            )
+            if registered is None:
+                _warn_once(
+                    f"{key}_tool_shadowed",
+                    f"Pulse Chat: l'outil {name} n'a pas ete enregistre (nom deja pris ?)",
+                )
+            elif name == KNOWLEDGE_SEARCH_TOOL_NAME:
+                # La fonction annoncee (et le hint) suivent la RECHERCHE : sans
+                # elle, les trois autres ne disent pas quoi lire.
+                _KNOWLEDGE_TOOLS_REGISTERED = True
+        except Exception as exc:
+            _warn_once(f"{key}_tool_failed", f"Pulse Chat: outil {name} non enregistre — {exc}")
+
+
 def register(ctx):
     """Point d'entree plugin : appele par le systeme de plugins Hermes."""
+    # AVANT l'entree de plateforme : son ``platform_hint`` ne nomme les outils
+    # de connaissance que s'ils sont REELLEMENT enregistres.
+    _register_knowledge_tools(ctx)
     entry = dict(
         name="pulse_chat",
         label="Pulse Chat",
@@ -3491,6 +3778,7 @@ def register(ctx):
             "script: use these tools, and on a refusal follow its `hint`. "
             "Details: load the skill pulse-chat:guide."
             + _browser_hint(ctx)
+            + _knowledge_hint()
         ),
     )
     # ``parse_target_ref_fn`` n'existe pas sur les Hermes anterieurs a

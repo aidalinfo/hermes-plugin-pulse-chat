@@ -1,7 +1,7 @@
 name: pulse-chat
 label: Pulse Chat
 kind: platform
-version: 1.19.2
+version: 1.20.0
 description: >
   Adaptateur de plateforme Pulse Chat pour Hermes Agent.
   Relaie les messages entre l'app Pulse Chat (front de conversation client)
@@ -68,3 +68,16 @@ optional_env:
       le jeton partirait sans chiffrement). Inutile vers un hote local.
     prompt: "Autoriser le clair vers un hote public ? (1/vide)"
     password: false
+  - name: PULSE_KNOWLEDGE_URL
+    description: >
+      URL du service local de connaissance d'un bot de la Bot Factory
+      (ex: http://knowledge:8787). Avec PULSE_KNOWLEDGE_TOKEN, enregistre les
+      outils pulse_knowledge_* ; absente, aucun outil n'est enregistre.
+    prompt: "URL du service de connaissance (ou vide)"
+    password: false
+  - name: PULSE_KNOWLEDGE_TOKEN
+    description: >
+      Jeton du service local de connaissance (genere a l'installation),
+      envoye au service seulement — jamais a Pulse Chat.
+    prompt: "Jeton du service de connaissance (ou vide)"
+    password: true
