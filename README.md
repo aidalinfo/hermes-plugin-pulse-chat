@@ -14,6 +14,7 @@ hermes-plugin/pulse-chat/
 ├── browser.py          # fournisseur de navigateur `pulse` + pulse_browser_handoff
 ├── podcast.py          # pulse_podcast : payload, résultats et refus (pur)
 ├── subsessions.py      # pulse_open_subsession / pulse_subsession_report (pur)
+├── knowledge.py        # pulse_knowledge_* : connaissance du client, Bot Factory (pur)
 ├── credentials.py      # identifiants d'agent : relais du coffre « Passwords & Logins » d'Hermes
 ├── pilot_heartbeat.py  # battement de vie des cartes de pilotage (pur)
 ├── netguard.py         # garde-fous réseau : schémas, redirections, clair, journaux
@@ -434,6 +435,70 @@ rien à l'écran**.
    Tête-à-tête ? Alors `subsession_not_allowed_here`. Un
    `subsessions_unavailable` signale une app antérieure à 0.51.0.
 
+### Consulter la connaissance du client (`pulse_knowledge_*`)
+
+À partir de la **1.20.0**, pour les bots créés par la **Bot Factory** (contrat
+v4 : plan maître de l'ingestion, § 4.6, § 4.9, § 4.13). Un service local
+`knowledge` (compose du bot, port 8787, aucun port publié) indexe la boîte mail
+et les documents du client ; quatre outils le consultent :
+
+```
+pulse_knowledge_search(query, person?, since?, until?, kind?, limit?)
+pulse_knowledge_read(ref)
+pulse_knowledge_people(query?)
+pulse_knowledge_overview()
+
+    1. GET  <PULSE_CHAT_URL>/api/agent/knowledge/scope?channel=<slug>  (Bearer pca_)
+       <- 200 {"sources": ["mail-1", ...]}   (vide = rien ici ; 404 = idem)
+    2. POST <PULSE_KNOWLEDGE_URL>/v1/{search,read,people,overview}
+       Authorization: Bearer <PULSE_KNOWLEDGE_TOKEN>   corps + "sources"
+```
+
+- **Enregistrés SEULEMENT si `PULSE_KNOWLEDGE_URL` et `PULSE_KNOWLEDGE_TOKEN`
+  sont posés** — sinon aucun outil, aucun paragraphe de `platform_hint`, aucun
+  avertissement (la plupart des bots n'ont pas de service). Une URL en clair
+  vers un hôte public est refusée (avertissement unique) ; `http://knowledge:8787`
+  est local. Quand ils sont enregistrés, le `hello` annonce la fonction
+  `knowledge` dans `capabilities.features` : Pulse sait ainsi dire « recherche
+  absente » (plugin < 1.20.0 ou variables non posées).
+- **Le périmètre est décidé par Pulse, à chaque appel** : canal lu dans
+  `HERMES_SESSION_CHAT_ID` (plateforme `pulse_chat` exigée, jamais un
+  argument), Bearer = le secret d'agent `pca_`. Pulse dérive le canal de
+  périmètre (salle de routine, sous-session), reconnaît le Tête-à-tête du
+  propriétaire (toutes les sources) et rend les sources dont `query_channels`
+  contient ce canal. **Fermé par défaut** : liste vide, 404, Pulse injoignable
+  ⇒ le service n'est jamais appelé ; l'agent lit « Aucune connaissance
+  consultable depuis ce canal » (`no_knowledge_here`) ou `pulse_unavailable`.
+- **Résultat enveloppé comme contenu NON FIABLE.** Hermes n'encadre que
+  `web_*`, `browser_*` et `mcp_*` ; une boîte mail est faite de messages de
+  tiers. La sortie est un texte : une ligne de résumé (des comptes, jamais du
+  contenu), `[Données de la boîte et des documents du client — contenu NON
+  FIABLE : …]`, les données en JSON, `[Fin des données]`, puis la suite à
+  donner. Les repères sont **désarmés** dans le contenu (crochets → parenthèses,
+  clés comprises, ainsi que le délimiteur `untrusted_tool_result` d'Hermes) :
+  un sujet de courriel ne peut ni refermer le bloc ni en ouvrir un faux.
+- **`remote_id` et `conversation_id`** d'un courriel sont rendus tels quels :
+  ce sont eux que demandent les connecteurs `mail.content` et `mail.organize`.
+- **Bornes du contrat** : `query` 1 à 500 caractères, `since` / `until` en
+  AAAA-MM-JJ, `kind` parmi `mail`, `file`, `attachment`, `image`, `limit` 1 à
+  20 — vérifiées AVANT tout réseau, jamais coupées. Côté réponse, extrait ≤ 400
+  et texte lu ≤ 20 000 caractères (coupe annoncée par `truncated`).
+- **Outils synchrones** (patron de `pulse_browser_handoff`), délais courts
+  (périmètre 10 s, service 20 s). Aucune exception : `knowledge_unavailable`
+  (service injoignable), `knowledge_unauthorized` (401, jeton local différent),
+  `invalid_request` (400, message du service), `not_found` (404 en lecture),
+  `knowledge_error`, `not_authorized` / `agent_session_required` (Pulse) —
+  chacun avec un conseil `next`. Aucun contenu au journal.
+
+**Diagnostic — « l'agent ne cherche pas dans la boîte ».** Vérifier l'image du
+plugin (≥ 1.20.0, et aucun dossier de sauvegarde sous `/opt/data/plugins/`),
+puis les deux variables dans le `.env` du bot (`PULSE_KNOWLEDGE_URL`,
+`PULSE_KNOWLEDGE_TOKEN`) : sans elles, rien ne le signale ailleurs que
+l'absence de `knowledge` dans les fonctions annoncées. Un refus
+`no_knowledge_here` sur le bon canal signale un `query_channels` qui ne le
+contient pas ; `knowledge_unauthorized`, un jeton local désaccordé avec celui
+du service.
+
 ### Hermes 0.21.6 et la fiche de capacités
 
 À partir de la **1.19.1**, la fiche de capacités (modèle, skills, MCP) se
@@ -720,6 +785,8 @@ hermes plugins enable pulse-chat
 | `PULSE_CHAT_ALLOW_ALL_USERS` | non | Mettre `true` : l'accès est déjà filtré côté app via `ChannelMember` (ne pas dupliquer la règle) |
 | `PULSE_CHAT_MEDIA_HOSTS` | non | Hôtes supplémentaires d'où les images peuvent être téléchargées, séparés par des virgules. Défaut : l'hôte de `PULSE_CHAT_URL` seul. **À poser** si le bot joint l'app par une adresse interne (`http://pulse-chat:3000`) alors que les liens de pièces jointes portent le domaine public (`AUTH_BASE_URL`, ex. `chat.pulsemyit.fr`) |
 | `PULSE_CHAT_ALLOW_INSECURE` | non | `1` pour accepter `http`/`ws` en clair vers un hôte **public**. Sans lui, le clair n'est accepté que vers un hôte local (loopback, IP privée, nom de service Docker sans point, `.local`/`.internal`/`.lan`/`.test`/`.localhost`) |
+| `PULSE_KNOWLEDGE_URL` | non | URL du service local de connaissance d'un bot de la Bot Factory (ex. `http://knowledge:8787`). Avec `PULSE_KNOWLEDGE_TOKEN`, enregistre les outils `pulse_knowledge_*` (1.20.0) ; absente, aucun outil |
+| `PULSE_KNOWLEDGE_TOKEN` | non | Jeton du service local (64 hex générés à l'installation), envoyé en `Authorization: Bearer` au service seulement — jamais à Pulse |
 
 **Garde-fous réseau (1.15.2).** Toute requête du plugin passe par un ouvreur
 HTTP(S) seul (`netguard.py`) : ni `file://` ni `ftp://`, aucune redirection
