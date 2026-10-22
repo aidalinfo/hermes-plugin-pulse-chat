@@ -136,6 +136,17 @@ from .knowledge import (
     service_url as knowledge_service_url,
     success_result as knowledge_success,
 )
+from .genui import (
+    UI_SKILL_NAME,
+    UI_TOOL_DESCRIPTION,
+    UI_TOOL_NAME,
+    UI_TOOL_SCHEMA,
+    UiToolError,
+    build_ui_payload,
+    http_refusal as ui_http_refusal,
+    refused_result as ui_refused,
+    success_result as ui_success,
+)
 from .podcast import (
     PODCAST_TOOL_DESCRIPTION,
     PODCAST_TOOL_NAME,
@@ -2052,6 +2063,33 @@ class PulseChatAdapter(BasePlatformAdapter):
             return subsession_http_refusal(status, body)
         return subsession_reported(body)
 
+    async def tool_ui(self, chat_id: str, args: Dict[str, Any]) -> str:
+        """Corps de ``pulse_ui`` — rend TOUJOURS une chaine JSON.
+
+        Transport pur (cf. ``genui.py``) : la forme de l'appel est verifiee ici,
+        le FOND par l'app, dont le refus (``issues`` + ``hint``) est rendu tel
+        quel pour que le modele corrige sa carte seul. Aucun succes sans 2xx.
+        """
+        op = (args or {}).get("op")
+        try:
+            payload = build_ui_payload(chat_id, dict(args or {}))
+        except UiToolError as exc:
+            return ui_refused(exc.code, exc.message)
+        try:
+            status, body = await asyncio.to_thread(
+                self._http_detailed,
+                "POST",
+                f"{self.base_url}/api/agent/messages",
+                body=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+        except Exception as exc:
+            logger.warning("Pulse Chat: carte non envoyee — %s", exc)
+            return ui_refused("not_sent", str(exc))
+        if not 200 <= status < 300:
+            return ui_http_refusal(status, body)
+        return ui_success(str(op), body)
+
     # ── Connecteurs tiers (Outlook, Teams, agenda) ───────────────────────
 
     async def call_connector(
@@ -3187,6 +3225,54 @@ async def _pulse_podcast(args: Dict[str, Any], **_kwargs: Any) -> str:
     return out
 
 
+async def _pulse_ui(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Handler de ``pulse_ui``. Meme chemin que les outils de coffre : canal
+    lu dans le contexte de session, appel sur la boucle du WebSocket. Les
+    refus locaux sont re-rendus avec les conseils des cartes."""
+    out = await _run_workspace_tool("tool_ui", args)
+    try:
+        parsed = json.loads(out)
+    except (TypeError, ValueError):
+        return ui_refused("not_sent", "Reponse illisible")
+    if parsed.get("status") == "refused" and parsed.get("code") in ("no_channel", "not_connected", "not_sent") and "issues" not in parsed:
+        return ui_refused(parsed["code"], str(parsed.get("message") or ""))
+    return out
+
+
+def _register_ui_tool(ctx) -> None:
+    """Outil + skill des cartes interactives (docs/66 de l'app). Isoles : leur
+    echec ne fait tomber ni la plateforme ni les autres outils."""
+    try:
+        registered = ctx.register_tool(
+            name=UI_TOOL_NAME,
+            toolset="pulse_chat",
+            schema=UI_TOOL_SCHEMA,
+            handler=_pulse_ui,
+            is_async=True,
+            description=UI_TOOL_DESCRIPTION,
+            emoji="🧩",
+        )
+        if registered is None:
+            _warn_once(
+                "ui_tool_shadowed",
+                f"Pulse Chat: l'outil {UI_TOOL_NAME} n'a pas ete enregistre (nom deja pris ?)",
+            )
+    except Exception as exc:
+        _warn_once("ui_tool_failed", f"Pulse Chat: outil {UI_TOOL_NAME} non enregistre — {exc}")
+    try:
+        skill_path = pathlib.Path(__file__).resolve().parent / "skills" / UI_SKILL_NAME / "SKILL.md"
+        ctx.register_skill(
+            UI_SKILL_NAME,
+            skill_path,
+            description=(
+                "Cartes interactives (pulse_ui) : quand une carte sert mieux que du texte, "
+                "le catalogue des composants, les formules, les actions et des exemples complets."
+            ),
+        )
+    except Exception as exc:
+        _warn_once("ui_skill_failed", f"Pulse Chat: skill {UI_SKILL_NAME} non enregistre — {exc}")
+
+
 def _register_podcast_tool(ctx) -> None:
     """Outil de podcast. Isole : son echec ne fait tomber ni la plateforme ni
     les autres outils."""
@@ -3878,6 +3964,18 @@ def register(ctx):
             "sub-session; when the work is done, call pulse_subsession_report "
             "from inside it: the report comes back to the main conversation as "
             "an incoming message, where you answer the human.\n\n"
+            # Hermes n'annonce jamais un skill de plugin : sans ce paragraphe,
+            # l'outil existe mais l'agent ne sait ni QUAND s'en servir, ni
+            # qu'un catalogue l'attend (docs/66 de l'app).
+            "Interactive cards: when a card serves better than text (comparing "
+            "several options on several criteria, figures over time, a "
+            "calculation with parameters, collecting 3+ fields), call pulse_ui "
+            "to show a native interactive card (table, key figures, chart, "
+            "comparison, form, buttons). Plain text stays the default. Load the "
+            "skill pulse-chat:interface before your first card. What the human "
+            "submits comes back to you as a message starting with "
+            "[Interface : ...]. Never use a card to ask for approval "
+            "(pulse_request_approval does that).\n\n"
             # Le seul texte qui atteint TOUT agent : sans lui, le skill guide
             # ci-dessous n'existe pour personne (``register_skill`` = chargement
             # explicite), et un agent a qui une publication a ete refusee
@@ -3917,6 +4015,7 @@ def register(ctx):
     _register_workspace_tools(ctx)
     _register_podcast_tool(ctx)
     _register_subsession_tools(ctx)
+    _register_ui_tool(ctx)
     _register_guide_skill(ctx)
     _register_browser(ctx)
     _register_todo_hook(ctx)
