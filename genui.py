@@ -58,7 +58,7 @@ UI_OPS = ("render", "patch", "close")
 COMPONENT_TYPES = (
     "stack", "grid", "card", "tabs", "accordion", "separator",
     "heading", "text", "badge", "alert", "code", "kv",
-    "stat", "table", "list", "timeline", "progress", "comparison", "chart",
+    "stat", "table", "list", "timeline", "progress", "comparison", "chart", "image",
     "input", "textarea", "select", "radio", "segmented", "checkbox", "switch", "slider", "date",
     "button", "actions", "link", "copy",
 )
@@ -74,7 +74,9 @@ UI_TOOL_DESCRIPTION = (
     "(pulse_request_approval) ni pour un document a garder (pulse_publish_artifact). "
     "op='render' pose (ou remplace, meme surface_id) la carte : `document` = "
     "{title, description?, root, components: [{id, type, ...}] (liste PLATE, "
-    "parents -> `children` par id), data?, computed?, submit?: 'once'|'each'}. "
+    "parents -> `children` par id), data?, computed?, submit?: 'once'|'each', "
+    "state?: 'local'|'shared' (shared = valeurs vues et modifiees par tous en direct)}. "
+    "Une image = fichier DEJA depose au coffre, src='vault:<chemin>'. "
     "op='patch' la modifie : `patch` = operations JSON Patch sur le document "
     "(ex. {op:'replace', path:'/data/total', value:42}). op='close' la ferme. "
     "Ce que la personne soumet te revient comme un message `[Interface : ...]` "

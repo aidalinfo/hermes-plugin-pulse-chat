@@ -62,7 +62,8 @@ mieux qu'une phrase.
   "components": [ { "id": "root", "type": "stack", "children": ["a", "b"] }, … ],
   "data": { … },
   "computed": { "/total": "prix * quantite" },
-  "submit": "once"
+  "submit": "once",
+  "state": "local"
 }
 ```
 
@@ -81,6 +82,12 @@ mieux qu'une phrase.
 - **`visible`** sur tout composant : `{ "=": "retard > 0" }`.
 - **`submit`** : `once` (défaut — la première réponse ferme la carte) ou
   `each` (sondage : chacun répond).
+- **`state`** : `local` (défaut — chacun remplit SA copie jusqu'à l'envoi) ou
+  `shared` (état PARTAGÉ : tous les humains du canal voient et modifient les
+  mêmes valeurs en direct — planning d'équipe, liste à cocher à plusieurs,
+  arbitrage en réunion). Tu ne reçois rien à chaque saisie : les valeurs
+  arrivent avec la soumission, et un `patch` de ta part qui change une valeur
+  de `data` liée à un champ remplace ce que les humains y avaient mis.
 - **`layout: "wide"`** pour un tableau large (ignoré au téléphone).
 - **Couleurs** par nom seulement : `primary secondary success info warning
   error neutral`. **Icônes** Lucide de la liste fermée (`euro`, `calendar`,
@@ -116,6 +123,13 @@ default|muted, `size`), `badge` (`label`, `color`, `variant` soft|outline|solid)
   `x` (clé de l'abscisse ou de la catégorie), `series[{key, label, color}]`
   (1 à 6 ; un donut en a exactement une), `format`, `currency`, `xFormat`,
   `height` sm|md|lg, `legend`, `title`, `description` — 2 000 points au plus.
+
+**Image** — `image` : `src` = `"vault:<chemin>"` d'une image DÉJÀ déposée au
+coffre du canal (png, jpg, gif, webp ; jamais une URL, jamais un SVG), `alt`
+obligatoire (ce que l'image montre), `caption`, `ratio` auto|16/9|4/3|1/1|3/4,
+`fit` cover|contain — 6 images au plus. Dépose d'abord le fichier
+(`channel_vault_write` ou ton outil de coffre), PUIS pose la carte : une image
+absente du coffre fait refuser la carte.
 
 **Formats** : `text number integer decimal percent currency date datetime
 relative duration bytes boolean badge`.
