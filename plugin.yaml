@@ -1,7 +1,7 @@
 name: pulse-chat
 label: Pulse Chat
 kind: platform
-version: 1.20.0
+version: 1.21.0
 description: >
   Adaptateur de plateforme Pulse Chat pour Hermes Agent.
   Relaie les messages entre l'app Pulse Chat (front de conversation client)
@@ -67,6 +67,13 @@ optional_env:
       1 pour accepter http/ws EN CLAIR vers un hote public (refuse par defaut :
       le jeton partirait sans chiffrement). Inutile vers un hote local.
     prompt: "Autoriser le clair vers un hote public ? (1/vide)"
+    password: false
+  - name: PULSE_CHAT_VAULT_READ_ROOTS
+    description: >
+      Dossiers ou pulse_vault_read peut deposer un fichier lu au coffre,
+      separes par ":" (defaut: /opt/data/workspace:/opt/data/cache/scratch).
+      Le premier recoit l'inbox/ par defaut. A poser hors de l'image Hermes de Pulse.
+    prompt: "Racines de pulse_vault_read (separees par ':' — ou vide)"
     password: false
   - name: PULSE_KNOWLEDGE_URL
     description: >

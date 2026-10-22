@@ -34,7 +34,8 @@ servir de Pulse Chat une fois branché : les outils MCP de `/mcp-hermes`
 `connector_*`, le plan de travail `plan_*`, `routine_deliver`), l'écriture au
 coffre et la publication d'un fichier (outils du plugin `pulse_vault_write` et
 `pulse_publish_artifact`, secours MCP `channel_vault_upload_url` /
-`channel_artifact_publish`), le piège `plan_*` vs `tasks_*`, brouillon contre
+`channel_artifact_publish`), la récupération d'un fichier du coffre sur le
+disque (`pulse_vault_read`), le piège `plan_*` vs `tasks_*`, brouillon contre
 envoi réel, les pièces jointes par référence préfixée, et quoi faire d'un
 refus. Jusqu'à la 1.11.0, ce fichier vivait à la racine et n'était enregistré
 nulle part : aucun agent ne le lisait.
@@ -313,6 +314,42 @@ path="artifacts/devis.pdf", title="Devis — V4", artifact_id="devis-client")`.
   fermer quelque chose.
 
 Aucune mise à jour de l'app n'est requise : les routes existent déjà.
+
+### Récupérer un fichier du coffre sur le disque (`pulse_vault_read`)
+
+Outil du plugin (≥ 1.21.0). Le chemin inverse de `pulse_vault_write` : le MCP
+`channel_vault_read` ne rend d'un binaire que ses métadonnées (chemin, MIME,
+taille), pas ses octets. Restaurer deux ZIP après une migration de session
+demandait donc d'appeler l'API du coffre à la main depuis le runtime du bot.
+
+```
+pulse_vault_read(path, local_path?, overwrite?)        # outil, toolset "pulse_chat"
+    -> GET /api/agent/vault/<canal>/<path>              (octets EN FLUX vers le disque)
+    <- {status: "downloaded", local_path, size, sha256, mime}
+```
+
+- **Le canal n'est pas un paramètre** : il vient de `gateway.session_context`,
+  comme pour l'écriture. L'agent ne lit que le coffre de la conversation en
+  cours.
+- **Aucun octet ne revient au modèle** — ni contenu, ni base64 : seulement le
+  chemin local, la taille, le SHA-256 des octets reçus et le type MIME servi.
+- **Destination bornée.** Sans `local_path`, le fichier arrive sous
+  `/opt/data/workspace/inbox/<path>` (nom libre `nom-1.ext` si déjà pris).
+  Un `local_path` doit tomber sous `/opt/data/workspace` ou
+  `/opt/data/cache/scratch` (`PULSE_CHAT_VAULT_READ_ROOTS` pour d'autres
+  racines) ; un chemin relatif part de la première. Refusés
+  (`local_path_forbidden`) : `..`, `~`, hors racines, **tout lien symbolique**
+  entre la racine et le fichier (un lien vers `/opt/data/.env` ferait écraser
+  le jeton de service). Un fichier existant n'est remplacé qu'avec
+  `overwrite: true` (`local_file_exists` sinon).
+- **Atomique.** Les octets vont dans un `.part` voisin, créé en exclusif sans
+  suivre de lien, puis prennent leur nom d'un seul geste (`os.link` sans
+  écrasement, `os.replace` avec). Une réponse non 2xx, une taille annoncée ou
+  reçue au-delà de 100 Mo, ou un transfert coupé (`incomplete_transfer`) ne
+  laisse **aucun** fichier final, et jamais un succès annoncé.
+
+Comme pour `pulse_vault_write`, le disque est celui de la **passerelle** : un
+terminal d'agent dans un bac à sable séparé ne verra pas le fichier.
 
 ### Faire un podcast (`pulse_podcast`)
 
@@ -803,6 +840,7 @@ hermes plugins enable pulse-chat
 | `PULSE_CHAT_ALLOW_ALL_USERS` | non | Mettre `true` : l'accès est déjà filtré côté app via `ChannelMember` (ne pas dupliquer la règle) |
 | `PULSE_CHAT_MEDIA_HOSTS` | non | Hôtes supplémentaires d'où les images peuvent être téléchargées, séparés par des virgules. Défaut : l'hôte de `PULSE_CHAT_URL` seul. **À poser** si le bot joint l'app par une adresse interne (`http://pulse-chat:3000`) alors que les liens de pièces jointes portent le domaine public (`AUTH_BASE_URL`, ex. `chat.pulsemyit.fr`) |
 | `PULSE_CHAT_ALLOW_INSECURE` | non | `1` pour accepter `http`/`ws` en clair vers un hôte **public**. Sans lui, le clair n'est accepté que vers un hôte local (loopback, IP privée, nom de service Docker sans point, `.local`/`.internal`/`.lan`/`.test`/`.localhost`) |
+| `PULSE_CHAT_VAULT_READ_ROOTS` | non | Dossiers où `pulse_vault_read` peut déposer un fichier lu au coffre, séparés par `:` (défaut `/opt/data/workspace:/opt/data/cache/scratch`, 1.21.0). Le premier reçoit `inbox/` quand l'agent ne donne pas de `local_path` |
 | `PULSE_KNOWLEDGE_URL` | non | URL du service local de connaissance d'un bot de la Bot Factory (ex. `http://knowledge:8787`). Avec `PULSE_KNOWLEDGE_TOKEN`, enregistre les outils `pulse_knowledge_*` (1.20.0) ; absente, aucun outil |
 | `PULSE_KNOWLEDGE_TOKEN` | non | Jeton du service local (64 hex générés à l'installation), envoyé en `Authorization: Bearer` au service seulement — jamais à Pulse |
 
@@ -815,7 +853,9 @@ l'hôte de l'app (ou `PULSE_CHAT_MEDIA_HOSTS`), et les journaux n'impriment
 jamais la query d'une URL (la signature d'un lien de téléchargement y vit).
 `pulse_vault_write` refuse de déposer un fichier de secrets évident (`.env*`,
 `auth.json`, `.netrc`, `~/.ssh`, `~/.aws`, `/proc`…) : le coffre est
-téléchargeable par tous les membres du canal.
+téléchargeable par tous les membres du canal. `pulse_vault_read` n'écrit que
+sous ses racines (`PULSE_CHAT_VAULT_READ_ROOTS`), sans `..` ni lien
+symbolique, et n'écrase rien sans `overwrite: true`.
 
 ### `~/.hermes/config.yaml`
 

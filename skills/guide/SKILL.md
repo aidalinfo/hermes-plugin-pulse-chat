@@ -1,6 +1,6 @@
 ---
 name: guide
-description: Se servir de Pulse Chat depuis un agent Hermes — lire un canal (channels_list pour apprendre les slugs, channel_context pour le fil, channel_members pour qui est là, channel_artifact et le coffre), le plan de travail plan_* (dépendances comprises), écrire au coffre et publier un fichier (pulse_vault_write + pulse_publish_artifact du plugin, ou en secours channel_vault_upload_url + channel_artifact_publish du MCP), les connecteurs délégués connector_*, routine_deliver, le piège plan_* contre tasks_*, et quoi faire d'un refus (emitter_ambiguous, agent_credential_required, channel_not_served…). À charger dès qu'un canal Pulse Chat demande de retrouver ce qui s'est dit, d'agir sur un compte tiers, de tenir un plan de tâches, de déposer ou montrer un fichier, ou de répondre à une routine.
+description: Se servir de Pulse Chat depuis un agent Hermes — lire un canal (channels_list pour apprendre les slugs, channel_context pour le fil, channel_members pour qui est là, channel_artifact et le coffre), le plan de travail plan_* (dépendances comprises), écrire au coffre et publier un fichier (pulse_vault_write + pulse_publish_artifact du plugin, ou en secours channel_vault_upload_url + channel_artifact_publish du MCP), récupérer un fichier du coffre sur le disque (pulse_vault_read), les connecteurs délégués connector_*, routine_deliver, le piège plan_* contre tasks_*, et quoi faire d'un refus (emitter_ambiguous, agent_credential_required, channel_not_served…). À charger dès qu'un canal Pulse Chat demande de retrouver ce qui s'est dit, d'agir sur un compte tiers, de tenir un plan de tâches, de déposer, récupérer ou montrer un fichier, ou de répondre à une routine.
 ---
 
 > Enregistré par le plugin sous le nom `pulse-chat:guide` (`register_skill`,
@@ -27,7 +27,8 @@ tente pas d'actions vouées au refus, et sait nommer à l'humain ce qui lui manq
 | Livrer la réponse d'une routine | **outil MCP** `routine_deliver` |
 | Savoir dans quels canaux tu travailles | **outil MCP** `channels_list` |
 | Retrouver ce qui s'est dit, qui est là, un document publié | **outils MCP** `channel_context`, `channel_members`, `channel_artifact` |
-| Lire le coffre-fort d'un canal | **outils MCP** `channel_vault_list`, `channel_vault_read` |
+| Lire le coffre-fort d'un canal | **outils MCP** `channel_vault_list`, `channel_vault_read` (texte, et métadonnées d'un binaire) |
+| Récupérer un fichier du coffre sur ton disque (ZIP, PDF, tableur, tout binaire) pour le traiter | **outil du plugin** `pulse_vault_read` (`path`, `local_path` facultatif) — rend le chemin local et le SHA-256, jamais les octets |
 | Écrire un fichier au coffre-fort (PDF, tableur, image, vidéo, texte…) | **outil du plugin** `pulse_vault_write` (`path` + `local_path`, ou `content` pour un texte). En secours, si cet outil n'est pas dans ta liste : **outils MCP** `channel_vault_write` (petit fichier) ou `channel_vault_upload_url` (gros fichier : tu fais le PUT toi-même) |
 | Montrer un fichier ou un document dans la conversation | **outil du plugin** `pulse_publish_artifact` — `kind: "file"` + `path` pour un fichier déjà écrit au coffre ; en secours, **outil MCP** `channel_artifact_publish`. Republier le même `artifact_id` crée une nouvelle version |
 | Montrer un film (animation générée) | **outil du plugin** `pulse_publish_artifact` — `kind: "motion"` + `path` pour une page HTML déjà écrite au coffre |
@@ -47,6 +48,19 @@ fichier, appelle ENSUITE `pulse_publish_artifact` avec `kind: "file"` et le mêm
 `path`. N'annonce pas à l'humain qu'un fichier est disponible tant que cet outil
 n'a pas rendu `published`. Comme `pulse_request_approval`, aucun des deux ne
 prend de canal : c'est celui de la conversation en cours.
+
+**Récupérer un fichier du coffre — `pulse_vault_read`.** `channel_vault_read`
+(MCP) te rend le contenu d'un petit **texte**, mais d'un binaire seulement le
+chemin, le type et la taille. Dès qu'il te faut les **octets** — dézipper une
+archive, ouvrir un PDF ou un tableur avec tes outils, restaurer des fichiers
+après une migration —, appelle `pulse_vault_read` avec le `path` exact rendu
+par `channel_vault_list`. Le fichier arrive sur ton disque, intact, sous
+`/opt/data/workspace/inbox/<path>` par défaut ; un `local_path` doit rester
+sous `/opt/data/workspace` ou `/opt/data/cache/scratch`. Un fichier existant
+n'est remplacé qu'avec `overwrite: true`. L'outil rend `local_path`, `size`,
+`sha256` et `mime` — jamais le contenu : travaille ensuite sur le fichier
+local. Sur `refused`, aucun fichier n'a été écrit : ne prétends pas l'avoir.
+N'appelle jamais l'API du coffre toi-même pour contourner un refus.
 
 **Un film, c'est `kind: "motion"`.** Une page HTML dont chaque image est une
 fonction pure de `t`, qui expose `window.__duration` (secondes) et

@@ -164,20 +164,29 @@ from .subsessions import (
 )
 from .vault import VaultPathError, normalize_vault_path, vault_url
 from .workspace import (
+    MAX_VAULT_FILE_BYTES,
     PUBLISH_DESCRIPTION,
     PUBLISH_SCHEMA,
     PUBLISH_TOOL_NAME,
     UPLOAD_TIMEOUT_SECONDS,
+    VAULT_READ_DESCRIPTION,
+    VAULT_READ_SCHEMA,
+    VAULT_READ_TOOL_NAME,
     VAULT_WRITE_DESCRIPTION,
     VAULT_WRITE_SCHEMA,
     VAULT_WRITE_TOOL_NAME,
     WorkspaceToolError,
     content_type_for,
+    downloaded_result,
     exclusive_source,
     http_refusal,
     published_result,
+    read_http_refusal,
+    read_refused,
     refused_result as workspace_refused,
+    resolve_download_target,
     resolve_local_file,
+    stream_to_file,
     written_result,
 )
 from .voice import (
@@ -1821,6 +1830,87 @@ class PulseChatAdapter(BasePlatformAdapter):
             return http_refusal(status, body)
         return written_result(path, size)
 
+    def _vault_download_for_tool(
+        self, chat_id: str, path: str, target: str, overwrite: bool
+    ) -> str:
+        """GET du coffre, octets EN FLUX vers ``target`` (bloquant).
+
+        Rend le JSON de l'outil. Aucun fichier final n'existe si la reponse
+        n'est pas 2xx, depasse le plafond ou s'interrompt : ``stream_to_file``
+        n'ecrit que dans un ``.part`` qu'il supprime alors.
+        """
+        url = vault_url(self.base_url, chat_id, path)
+        request = urllib.request.Request(url, headers=self._auth_headers(), method="GET")
+        try:
+            response = _urlopen(request, timeout=UPLOAD_TIMEOUT_SECONDS)
+        except urllib.error.HTTPError as exc:
+            logger.warning("Pulse Chat: GET %s -> HTTP %s", redact_url(url), exc.code)
+            try:
+                raw = exc.read()
+                body = json.loads(raw.decode("utf-8")) if raw else None
+            except Exception:
+                body = None
+            return read_http_refusal(int(exc.code), body)
+        except Exception as exc:
+            logger.warning("Pulse Chat: GET %s en echec — %s", redact_url(url), exc)
+            return read_http_refusal(0, {"message": str(exc)})
+        with response:
+            status = int(response.status)
+            if not 200 <= status < 300:
+                return read_http_refusal(status, None)
+            try:
+                declared: Optional[int] = int(response.headers.get("Content-Length"))
+            except (TypeError, ValueError):
+                declared = None
+            if declared is not None and declared > MAX_VAULT_FILE_BYTES:
+                return read_refused(
+                    "file_too_large",
+                    f"{declared} octets : le coffre sert au plus {MAX_VAULT_FILE_BYTES} octets par fichier",
+                )
+            mime = (
+                response.headers.get_content_type()
+                if response.headers.get("Content-Type")
+                else content_type_for(path)
+            )
+            try:
+                size, sha256 = stream_to_file(
+                    response, target, overwrite=overwrite, expected_size=declared
+                )
+            except WorkspaceToolError:
+                raise
+            except Exception as exc:
+                # Lecture coupee (IncompleteRead, delai de socket, connexion
+                # reinitialisee) : le .part est deja supprime.
+                logger.warning("Pulse Chat: GET %s interrompu — %s", redact_url(url), exc)
+                return read_refused("incomplete_transfer", f"Transfert interrompu : {exc}")
+        return downloaded_result(path, target, size, sha256, mime)
+
+    async def tool_vault_read(self, chat_id: str, args: Dict[str, Any]) -> str:
+        """Corps de ``pulse_vault_read`` — rend TOUJOURS une chaine JSON.
+
+        Le canal est ``chat_id`` (contexte de session), jamais un argument : le
+        modele ne peut lire que le coffre de la conversation ou il est. Aucun
+        octet ne revient au modele, seulement le chemin local et l'empreinte.
+        """
+        raw_local = args.get("local_path")
+        local_path = raw_local if isinstance(raw_local, str) and raw_local.strip() else None
+        overwrite = args.get("overwrite") is True
+        try:
+            path = normalize_vault_path(args.get("path"))
+            target = await asyncio.to_thread(
+                resolve_download_target, path, local_path, overwrite=overwrite
+            )
+            return await asyncio.to_thread(
+                self._vault_download_for_tool, chat_id, path, target, overwrite
+            )
+        except VaultPathError as exc:
+            return read_refused("invalid_request", f"Chemin de coffre refuse : {exc}")
+        except WorkspaceToolError as exc:
+            return read_refused(exc.code, exc.message)
+        except OSError as exc:
+            # Disque plein, droits : rien n'a ete annonce, le .part est parti.
+            return read_refused("not_sent", f"Ecriture locale impossible : {exc}")
+
     async def tool_publish_artifact(self, chat_id: str, args: Dict[str, Any]) -> str:
         """Corps de ``pulse_publish_artifact`` — rend TOUJOURS une chaine JSON.
 
@@ -3052,6 +3142,24 @@ async def _pulse_vault_write(args: Dict[str, Any], **_kwargs: Any) -> str:
     return await _run_workspace_tool("tool_vault_write", args)
 
 
+async def _pulse_vault_read(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Handler de ``pulse_vault_read``. Les refus locaux du chemin commun
+    (``no_channel``, ``not_connected``, ``not_sent``) sont re-rendus avec les
+    conseils d'une lecture : ceux de l'ecriture parleraient de deposer."""
+    out = await _run_workspace_tool("tool_vault_read", args)
+    try:
+        parsed = json.loads(out)
+    except (TypeError, ValueError):
+        return read_refused("not_sent", "Reponse illisible")
+    if parsed.get("status") == "refused" and parsed.get("code") in (
+        "no_channel",
+        "not_connected",
+        "not_sent",
+    ):
+        return read_refused(parsed["code"], str(parsed.get("message") or ""))
+    return out
+
+
 async def _pulse_publish_artifact(args: Dict[str, Any], **_kwargs: Any) -> str:
     """Handler de ``pulse_publish_artifact``."""
     return await _run_workspace_tool("tool_publish_artifact", args)
@@ -3175,6 +3283,7 @@ def _register_workspace_tools(ctx) -> None:
     n'empeche ni l'autre ni la plateforme."""
     for name, schema, handler, description, emoji in (
         (VAULT_WRITE_TOOL_NAME, VAULT_WRITE_SCHEMA, _pulse_vault_write, VAULT_WRITE_DESCRIPTION, "🗄️"),
+        (VAULT_READ_TOOL_NAME, VAULT_READ_SCHEMA, _pulse_vault_read, VAULT_READ_DESCRIPTION, "📥"),
         (PUBLISH_TOOL_NAME, PUBLISH_SCHEMA, _pulse_publish_artifact, PUBLISH_DESCRIPTION, "📎"),
     ):
         try:
@@ -3743,7 +3852,10 @@ def register(ctx):
             "tell the human a file is available before pulse_publish_artifact "
             "returned published. If those two tools are missing, the Pulse Chat "
             "MCP server offers channel_vault_upload_url (then PUT the file) and "
-            "channel_artifact_publish instead.\n\n"
+            "channel_artifact_publish instead. To get a file FROM the vault "
+            "onto your disk (zip, pdf, any binary), call pulse_vault_read with "
+            "its path: it returns local_path and sha256, never the bytes; "
+            "channel_vault_read only gives a binary's metadata.\n\n"
             # Hermes n'annonce jamais un skill de plugin au modele : sans ce
             # paragraphe, un agent a qui l'on demande « un resume a ecouter »
             # ecrirait un long message, ou le lirait en note vocale.
