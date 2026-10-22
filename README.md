@@ -13,11 +13,13 @@ hermes-plugin/pulse-chat/
 ├── hello.py            # frame hello multi-profils pure (0 dépendance hermes)
 ├── browser.py          # fournisseur de navigateur `pulse` + pulse_browser_handoff
 ├── podcast.py          # pulse_podcast : payload, résultats et refus (pur)
+├── genui.py            # pulse_ui : cartes interactives, payload et refus (pur)
 ├── subsessions.py      # pulse_open_subsession / pulse_subsession_report (pur)
 ├── knowledge.py        # pulse_knowledge_* : connaissance du client, Bot Factory (pur)
 ├── credentials.py      # identifiants d'agent : relais du coffre « Passwords & Logins » d'Hermes
 ├── pilot_heartbeat.py  # battement de vie des cartes de pilotage (pur)
 ├── netguard.py         # garde-fous réseau : schémas, redirections, clair, journaux
+├── skills/             # skills enregistrés (guide, interface, …)
 └── tests/              # pytest (sans hermes installé)
 ```
 
@@ -553,6 +555,41 @@ l'absence de `knowledge` dans les fonctions annoncées. Un refus
 `no_knowledge_here` sur le bon canal signale un `query_channels` qui ne le
 contient pas ; `knowledge_unauthorized`, un jeton local désaccordé avec celui
 du service.
+
+### Montrer une carte interactive (`pulse_ui`)
+
+À partir de la **1.22.0**, avec une app Pulse Chat **≥ 0.93.0** (docs/66 de
+l'app). L'agent compose une CARTE native dans la conversation — tableau
+triable, chiffres clés, graphique, comparatif, frise, formulaire, simulateur
+avec formules, image du coffre — quand elle sert mieux que du texte. Le skill
+`pulse-chat:interface` (catalogue, règles, huit exemples) est enregistré avec
+l'outil et cité par le paragraphe « Interactive cards » du `platform_hint`.
+
+```
+pulse_ui(op, surface_id, document?, patch?, text?)
+    op = render | patch | close        (le canal vient de la session, jamais un paramètre)
+
+    POST <PULSE_CHAT_URL>/api/agent/messages
+         {"channelSlug", "kind": "ui_surface", "op", "surfaceId", "document"|"patch", "text"?}
+      <- 200 {"surfaceId", "version", "status"}         -> {"status": "rendered", ...}
+      <- 400 {"data": {"code": "ui_invalid", "issues": [{path, message, hint}], "hint"}}
+                                                          -> rendu TEL QUEL au modèle
+```
+
+- **Transport pur** (`genui.py`) : le plugin ne juge que la FORME de l'appel et
+  la taille (`MAX_DOCUMENT_BYTES`) ; le catalogue est jugé par l'app, dont le
+  refus (`issues` + `hint`) permet au modèle de corriger sa carte seul. Aucun
+  `rendered` sans 2xx.
+- **Image** : `{"type": "image", "src": "vault:<chemin>", "alt": …}` — fichier
+  DÉJÀ déposé au coffre (`pulse_vault_write`) ; une image absente fait refuser
+  la carte.
+- **`state: "shared"`** : les humains du canal voient et modifient les mêmes
+  valeurs en direct ; rien n'arrive à l'agent avant la soumission.
+- **Ce que la personne soumet** revient en message ordinaire commençant par
+  `[Interface : <titre> → <action>]`, avec les valeurs jugées par l'app.
+- **App trop ancienne** (< 0.93.0) : 400 sur `kind: "ui_surface"`, relayé au
+  modèle, qui répond en texte. Repli sans plugin à jour : l'outil MCP
+  `channel_ui_render` (`/mcp-hermes`, mêmes paramètres + `channel`).
 
 ### Hermes 0.21.6 et la fiche de capacités
 

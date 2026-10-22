@@ -41,7 +41,7 @@ UI_SKILL_NAME = "interface"
 
 #: Version minimale de l'app. Documentaire : une app plus ancienne rend 400
 #: (``kind`` inconnu), relaye tel quel au modele.
-APP_MIN_VERSION = "0.91.0"
+APP_MIN_VERSION = "0.93.0"
 
 #: Bornes MIROIR de ``shared/genui/limits.ts`` — seule la taille est jugee ici.
 MAX_DOCUMENT_BYTES = 340 * 1024
