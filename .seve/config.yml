@@ -1,0 +1,8 @@
+# Configuration Sève (seve test / seve land). La gate de `seve land` lit ce
+# fichier sur la branche CIBLE : le modifier exige une tâche intégrée d'abord.
+#
+# Dépôt Python sans package.json : rien n'est déduit, d'où setup et test
+# explicites. L'image des jobs n'ayant pas de python3, .seve/python.sh y pose
+# un CPython autonome et pytest dans .seve-cache/ (cf. ce script).
+setup: sh .seve/python.sh
+test: sh .seve/python.sh && .seve-cache/python/bin/python3 -m pytest -q -p no:cacheprovider tests
