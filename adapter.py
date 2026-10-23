@@ -52,6 +52,7 @@ import weakref
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
+from .agent_settings import AgentSettingsStore, refusal_message
 from .approvals import (
     GATEWAY_APPROVAL_TOOL,
     build_approval_payload,
@@ -319,6 +320,11 @@ _DEDUP_MAX_IDS = 500
 #: adaptateur n'existe) : c'est par ici qu'il retrouve celui qui tient le
 #: WebSocket. Faible, pour ne rien retenir d'un adaptateur que Hermes a jete.
 _LIVE_ADAPTERS: "weakref.WeakSet[Any]" = weakref.WeakSet()
+
+# Reglages APPLIQUES par le plugin (#432) : outils retires et note de reglages,
+# par profil. Au niveau du MODULE : les crochets d'Hermes sont des fonctions
+# libres, appelees depuis ses threads, sans reference a l'adaptateur.
+_AGENT_SETTINGS = AgentSettingsStore()
 # Identite de l'emetteur : le serveur repond au ``hello`` par une trame
 # ``hello.ack`` portant un jeton OPAQUE lie a cette connexion. Le plugin le
 # memorise et le REJOINT a ses appels sortants (en-tete HTTP ci-dessous + champ
@@ -682,6 +688,16 @@ class PulseChatAdapter(BasePlatformAdapter):
         await self.interrupt_session_activity(session_key, chat_id)
         logger.info("Pulse Chat: tour interrompu a la demande de l'humain (%s)", chat_id)
 
+    def _handle_agent_settings(self, data: Dict[str, Any]) -> None:
+        """Trame ``agent.settings`` (#432) : reglages du profil, a la connexion
+        et a chaque modification dans Pulse Chat — appliques sans attendre le
+        message suivant, y compris au milieu d'un tour."""
+        profile = str(data.get("profile") or "")
+        if not profile:
+            return
+        _AGENT_SETTINGS.update(profile, data)
+        logger.info("Pulse Chat: reglages de l'agent %s recus", profile)
+
     def _handle_hello_ack(self, data: Dict[str, Any]) -> None:
         """Trame ``hello.ack`` -> memorisation du jeton (sans interpretation)."""
         token = session_token_from_ack(data)
@@ -829,6 +845,10 @@ class PulseChatAdapter(BasePlatformAdapter):
         # Frame hello AVANT la boucle de reception : le serveur enregistre le
         # peer pour ces profils (last-wins par profil) puis rejoue les messages
         # non livres de ces profils. Reconnexion => re-hello (meme chemin).
+        # Nouvelle connexion : les reglages connus sont oublies, l'app renvoie
+        # ce qui s'applique juste apres le hello (trame ``agent.settings``) —
+        # un reglage retire pendant la coupure ne survit pas a la reconnexion.
+        _AGENT_SETTINGS.reset()
         try:
             hello_frame = build_hello(self.profiles, self.agent_name, capabilities)
             # Le hello revoque le jeton precedent cote serveur : on l'oublie ici
@@ -921,6 +941,11 @@ class PulseChatAdapter(BasePlatformAdapter):
                         self._handle_hello_ack(data)
                     except Exception:
                         logger.exception("Pulse Chat: erreur de traitement hello.ack")
+                elif data.get("type") == "agent.settings":
+                    try:
+                        self._handle_agent_settings(data)
+                    except Exception:
+                        logger.exception("Pulse Chat: erreur de traitement agent.settings")
                 elif data.get("type") == "message.created":
                     try:
                         await self._handle_message_created(data)
@@ -1104,6 +1129,12 @@ class PulseChatAdapter(BasePlatformAdapter):
         if not slug or message_id is None:
             logger.warning("Pulse Chat: message.created incomplet ignore")
             return
+
+        # Reglages a jour du profil destinataire (#432) : retenus AVANT le tour,
+        # que les crochets appliquent (outil retire refuse, note de reglages).
+        _AGENT_SETTINGS.update(
+            str(channel.get("hermesProfile") or ""), data.get("agentConfig"), channel=slug
+        )
 
         # Dedup du rejeu : deja traite => re-ack (l'ack initial a pu se perdre)
         # mais PAS de second handle_message (pas de double dispatch agent).
@@ -3123,6 +3154,64 @@ def _on_post_tool_call(
     return None
 
 
+def _on_pre_tool_call(tool_name: str = "", args: Any = None, **_kwargs: Any) -> Optional[Dict[str, str]]:
+    """Hook ``pre_tool_call`` d'Hermes : REFUSE l'appel d'un outil retire (#432).
+
+    Hermes (v2026.9.24 comme v0.22.x, ``hermes_cli/plugins.py``) lit
+    ``{"action": "block", "message": ...}`` : l'outil ne s'execute pas et le
+    message devient son resultat. Le rappel tourne sous ``copy_context()`` du
+    thread de l'outil : le canal de la session y est lisible. Canal inconnu
+    (sous-agent, tache planifiee) => tout ce qui est retire s'applique.
+    Une erreur ici laisse passer l'appel, jamais ne fait tomber le tour.
+    """
+    try:
+        retired = _AGENT_SETTINGS.blocked(tool_name, args, _session_chat_id())
+    except Exception as exc:
+        logger.debug("Pulse Chat: controle des outils retires ignore — %s", exc)
+        return None
+    if retired is None:
+        return None
+    logger.info("Pulse Chat: appel de %s refuse (%s retire par un administrateur)", tool_name, retired)
+    return {"action": "block", "message": refusal_message(retired)}
+
+
+def _on_pre_llm_call(session_id: str = "", parent_session_id: str = "", **_kwargs: Any) -> Optional[Dict[str, str]]:
+    """Hook ``pre_llm_call`` d'Hermes : pose la note de reglages (#432).
+
+    Hermes ajoute ``{"context": ...}`` au message de l'utilisateur du tour
+    (jamais au prompt systeme) et le REJOUE aux tours suivants : la note n'est
+    donc posee qu'une fois par session, puis de nouveau quand elle change. Pas
+    pour un sous-agent : son brief vient de l'agent principal.
+    """
+    if parent_session_id:
+        return None
+    try:
+        note = _AGENT_SETTINGS.note_for_turn(str(session_id or ""), _session_chat_id())
+    except Exception as exc:
+        logger.debug("Pulse Chat: note de reglages ignoree — %s", exc)
+        return None
+    return {"context": note} if note else None
+
+
+def _register_settings_hooks(ctx) -> None:
+    """Crochets des reglages de l'agent (#432). Isoles : un echec ne fait
+    tomber ni la plateforme ni les outils, mais il se VOIT — un reglage qu'on
+    croit applique et qui ne l'est pas est exactement la panne corrigee ici."""
+    register_hook = getattr(ctx, "register_hook", None)
+    if register_hook is None:
+        _warn_once(
+            "settings_hooks_missing",
+            "Pulse Chat: cet Hermes ne connait pas register_hook — ton, consignes "
+            "et outils retires dans Pulse Chat ne sont PAS appliques.",
+        )
+        return
+    for name, callback in (("pre_tool_call", _on_pre_tool_call), ("pre_llm_call", _on_pre_llm_call)):
+        try:
+            register_hook(name, callback)
+        except Exception as exc:
+            _warn_once(f"settings_hook_{name}_failed", f"Pulse Chat: hook {name} non enregistre — {exc}")
+
+
 def _register_todo_hook(ctx) -> None:
     """Hook du plan de taches. Isole : un echec ne fait tomber ni la
     plateforme ni les outils."""
@@ -4019,3 +4108,4 @@ def register(ctx):
     _register_guide_skill(ctx)
     _register_browser(ctx)
     _register_todo_hook(ctx)
+    _register_settings_hooks(ctx)

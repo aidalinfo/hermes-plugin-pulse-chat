@@ -66,7 +66,9 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
   les messages non ackés à la reconnexion). Le `MessageEvent` ne porte
   **aucun** `metadata` (1.19.2) : le bloc `agentConfig` de la trame (ton,
   consignes, `disabledTools`) n'est lu par aucune version d'Hermes, et
-  l'admission native d'Hermes refuse tout `metadata` hors WhatsApp.
+  l'admission native d'Hermes refuse tout `metadata` hors WhatsApp. Ces
+  réglages sont appliqués par le plugin lui-même depuis la 1.23.0 (voir
+  « Réglages de l'agent »).
 - **plugin → app** : `POST <PULSE_CHAT_URL>/api/agent/messages`
   (header `Authorization: Bearer <PULSE_CHAT_TOKEN>`), body JSON
   `{channelSlug, kind, content, raw, hermesMessageId, tool, phase, replyToHermesId}`
@@ -780,6 +782,36 @@ tâches » : barre d'avancement, étape en cours, checklist au dépli.
   carte et ne lève jamais dans Hermes. Face à une app antérieure au champ
   `todos`, le POST est refusé en 400 (une fois journalisé) : rien d'autre ne
   change.
+
+### Réglages de l'agent (hooks `pre_tool_call` et `pre_llm_call`)
+
+À partir de la **1.23.0** (Pulse Chat #432). Ton, consignes et outils retirés se
+règlent dans Pulse Chat (`/settings` → Agents). Aucune version d'Hermes ne lit le
+bloc `agentConfig` : jusqu'ici, ces réglages n'avaient **aucun effet** sur le bot.
+Le plugin les applique par deux crochets d'Hermes (`agent_settings.py`) :
+
+- **Outil retiré ⇒ appel refusé** (`pre_tool_call`, `{"action": "block"}` : l'outil
+  ne s'exécute pas, le refus devient son résultat). Les clés réglables sont les
+  capacités annoncées au `hello` : un **serveur MCP** retiré bloque tous ses
+  outils (`mcp__<serveur>__…`), un **skill** retiré bloque sa lecture
+  (`skill_view`), un nom d'outil exact est bloqué tel quel. Le refus vaut pour
+  tous les tours du bot, sous-agents et tâches planifiées compris.
+- **Note de réglages ⇒ contexte du tour** (`pre_llm_call`, `{"context": …}` : ajoutée
+  au message de l'utilisateur, jamais au prompt système). Le TEXTE est écrit par
+  l'app (`contextNote`, en-tête `[Réglages de l’agent : …]`) ; le plugin le pose
+  une fois par session, puis de nouveau quand il change (Hermes rejoue le
+  contexte aux tours suivants). Pas pour un sous-agent. Réglages tous retirés
+  après une note ⇒ une ligne qui le dit, une fois.
+- **Transport** : trame `agent.settings` `{profile, disabledTools, contextNote}`
+  à la connexion et à chaque modification dans Pulse Chat (appliquée sans
+  attendre le message suivant, même au milieu d'un tour), et `agentConfig` de
+  chaque `message.created`. Chaque connexion repart d'un état vide.
+
+Rien de réglé ⇒ rien ne change. Vérifié sur le vrai Hermes v2026.9.24 et v0.22.2
+(découverte normale du plugin, dispatch d'Hermes) : refus d'un serveur MCP et
+d'un skill retirés, note ajoutée au premier tour d'une session et pas au suivant.
+Pulse Chat (avec #432) dit à l'écran quand le plugin d'un agent est trop ancien
+pour appliquer ces réglages.
 
 ### Battement de vie du pilotage (Pulse Pilotage, CDC §7.5)
 
