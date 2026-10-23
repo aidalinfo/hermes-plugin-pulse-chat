@@ -494,3 +494,40 @@ def test_collect_capabilities_n_importe_plus_l_ancien_nom_en_dur():
     source = _MODULE_PATH.read_text(encoding="utf-8")
     assert "import _read_bundled_manifest_names" not in source
     assert "_read_bundled_manifest_names,\n" not in source
+
+
+# ── skills_finder : `_find_all_skills` devenu `find_all_skills` (0.22.5) ──
+
+skills_finder = capabilities.skills_finder
+
+
+def _find_old():
+    return [{"name": "ancien"}]
+
+
+def _find_new():
+    return [{"name": "nouveau"}]
+
+
+def test_finder_hermes_0_22_5_prend_le_nom_public():
+    assert skills_finder(types.SimpleNamespace(find_all_skills=_find_new)) is _find_new
+
+
+def test_finder_hermes_anterieur_prend_l_ancien_nom():
+    assert skills_finder(types.SimpleNamespace(_find_all_skills=_find_old)) is _find_old
+
+
+def test_finder_les_deux_noms_presents_prefere_le_public():
+    tool = types.SimpleNamespace(find_all_skills=_find_new, _find_all_skills=_find_old)
+    assert skills_finder(tool) is _find_new
+
+
+def test_finder_aucun_symbole_rend_none():
+    assert skills_finder(types.SimpleNamespace()) is None
+
+
+def test_collect_capabilities_n_importe_aucun_nom_de_finder_en_dur():
+    # `from tools.skills_tool import _find_all_skills` faisait echouer TOUTE la
+    # fiche sur Hermes v0.22.5 (symbole supprime).
+    source = _MODULE_PATH.read_text(encoding="utf-8")
+    assert "from tools.skills_tool import" not in source

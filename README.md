@@ -932,6 +932,12 @@ stt:
   language: fr
 ```
 
+**Hermes ≥ v0.22.5 : plugin ≥ 1.22.1 obligatoire.** Hermes y a renommé
+`tools.skills_tool._find_all_skills` en `find_all_skills`, sans alias : les
+plugins antérieurs l'importaient en dur, et la fiche de capacités du profil
+(skills, MCP, modèle) partait vide (`capabilities: null`, `recolte des
+capacites impossible` dans le journal du bot). Le Gateway, lui, reste vivant.
+
 **Hermes construit depuis `main` après octobre 2026 (admission native) : plugin
 ≥ 1.19.2 obligatoire.** L'admission native refuse tout `MessageEvent.metadata`
 hors WhatsApp (`Native admission refused: invalid_params (metadata)` dans le

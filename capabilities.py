@@ -224,6 +224,10 @@ _BUNDLED_NAMES_RENAMED_IN = (0, 21, 6)
 _BUNDLED_NAMES_NEW = "_read_bundled_names"
 _BUNDLED_NAMES_OLD = "_read_bundled_manifest_names"
 
+#: ``tools.skills_tool._find_all_skills`` devenu public (``find_all_skills``)
+#: en Hermes v0.22.5, sans alias pour l'ancien nom. Nouveau nom en premier.
+_FIND_ALL_SKILLS_NAMES = ("find_all_skills", "_find_all_skills")
+
 
 def _parse_version(text: Any) -> Optional[tuple]:
     """``"0.21.6"`` -> ``(0, 21, 6)`` ; ``None`` si illisible ou PLACEHOLDER.
@@ -302,6 +306,20 @@ def bundled_names_reader(skill_usage: Any, version: Optional[str]) -> Optional[A
     return None
 
 
+def skills_finder(skills_tool: Any) -> Optional[Any]:
+    """La fonction de ``tools.skills_tool`` qui liste les skills du profil.
+
+    Choisie par la presence du symbole (``find_all_skills`` depuis Hermes
+    v0.22.5, ``_find_all_skills`` avant) : un import en dur de l'un des deux
+    noms fait echouer toute la fiche sur l'autre famille de versions.
+    ``None`` si aucun n'existe."""
+    for name in _FIND_ALL_SKILLS_NAMES:
+        finder = getattr(skills_tool, name, None)
+        if callable(finder):
+            return finder
+    return None
+
+
 def _profile_scope(profile: str):
     """Contexte de lecture de la configuration pour ``profile``.
 
@@ -315,7 +333,7 @@ def _profile_scope(profile: str):
     rien valider. Recevant ``"default"``, il faisait pointer HERMES_HOME sur un
     repertoire RELATIF inexistant — d'ou une configuration vide, zero skill,
     zero serveur MCP et aucun modele, **sans la moindre erreur** (`load_config`
-    rend `{}` pour un fichier absent, `_find_all_skills` une liste vide). La
+    rend `{}` pour un fichier absent, `find_all_skills` une liste vide). La
     fiche s'affichait donc « aucune competence · aucun MCP » sur un agent
     parfaitement configure.
 
@@ -385,7 +403,7 @@ def collect_capabilities(profile: str) -> Optional[Dict[str, Any]]:
         # A la place : `gateway.run._profile_runtime_scope`, qui attend un
         # REPERTOIRE de profil (HERMES_HOME), jamais un nom.
         with _profile_scope(profile):
-            from tools.skills_tool import _find_all_skills
+            from tools import skills_tool
             from hermes_cli.skills_config import get_disabled_skills
             from tools import skill_usage
             from tools.skill_usage import (
@@ -399,8 +417,13 @@ def collect_capabilities(profile: str) -> Optional[Dict[str, Any]]:
             except ImportError:
                 from hermes_cli.skills_config import load_config  # type: ignore[no-redef]
 
+            find_skills = skills_finder(skills_tool)
+            if find_skills is None:
+                raise ImportError(
+                    "tools.skills_tool n'expose ni find_all_skills ni _find_all_skills"
+                )
             config = load_config() or {}
-            skills = _find_all_skills() or []
+            skills = find_skills() or []
             disabled = set(get_disabled_skills(config) or [])
             hub_names = set(_read_hub_installed_names() or [])
             hermes_version = detect_hermes_version()
