@@ -17,6 +17,7 @@ hermes-plugin/pulse-chat/
 ├── subsessions.py      # pulse_open_subsession / pulse_subsession_report (pur)
 ├── knowledge.py        # pulse_knowledge_* : connaissance du client, Bot Factory (pur)
 ├── credentials.py      # identifiants d'agent : relais du coffre « Passwords & Logins » d'Hermes
+├── memory_export.py    # export de la mémoire (MEMORY.md, state.db, Hindsight) vers Pulse Chat
 ├── pilot_heartbeat.py  # battement de vie des cartes de pilotage (pur)
 ├── netguard.py         # garde-fous réseau : schémas, redirections, clair, journaux
 ├── skills/             # skills enregistrés (guide, interface, …)
@@ -662,6 +663,51 @@ que si `import agent.vault_store` réussit : vérifier l'image Hermes
 (≥ v2026.9.11), puis la version réellement chargée (`hermes plugins list`,
 ≥ 1.18.0, et **aucun dossier de sauvegarde** du plugin sous
 `/opt/data/plugins/`).
+
+### Export de la mémoire (trame `memory.export`, Data Act)
+
+À partir de la **1.24.0** (Pulse Chat docs/68). Un owner ou admin de
+l'organisation à laquelle l'agent est exclusif (sinon l'admin d'instance)
+exporte la mémoire de l'agent depuis le sous-onglet **Mémoire** de sa page.
+La mémoire ne transite **jamais** par l'app : le plugin assemble l'archive dans
+le bot et la dépose sur le stockage objet par un lien signé.
+
+```
+hello                 -> capabilities.features: ["memory_export"]   (si `import hermes_constants` réussit)
+memory.export         <- {exportId, profile, parts: ["memory", "sessions", "hindsight"]}
+  -> POST /api/agent/memory-exports/<id>/upload-url  {sizeBytes, contentType: "application/gzip"}  -> {url}
+  -> PUT  <url>   (Content-Type et Content-Length signés, SANS l'Authorization de l'app)
+  -> POST /api/agent/memory-exports/<id>/complete    {sizeBytes, sha256, manifest}
+  ou POST /api/agent/memory-exports/<id>/fail        {code: build_failed|too_large|upload_failed|busy}
+```
+
+Archive `tar.gz` :
+
+| Partie | Source dans le bot | Dans l'archive |
+|---|---|---|
+| `memory` | `$HERMES_HOME/memories/MEMORY.md`, `USER.md` | `memory/` |
+| `sessions` | `$HERMES_HOME/state.db`, par **`Connection.backup`** (cohérente sous WAL, jamais une copie brute) | `sessions/state.db` |
+| `hindsight` | banque(s) Hindsight si `memory.provider: hindsight` : `bank_id`, banques du `bank_id_template` (`{profile}` = le profil), `additional_banks` | `hindsight/<banque>/bank.json` (config, modèles mentaux, directives), `memories.jsonl`, `documents.jsonl` (texte d'origine) |
+
+Plus `manifest.json` à la racine : état de chaque partie (`included`, `absent`,
+`failed` avec un code court), versions, fournisseur de mémoire. Une partie en
+échec n'emporte pas les autres.
+
+- **Réglages Hindsight** lus comme Hermes : `$HERMES_HOME/hindsight/config.json`,
+  puis `~/.hindsight/config.json`, puis `HINDSIGHT_API_URL`, `HINDSIGHT_API_KEY`,
+  `HINDSIGHT_BANK_ID` (aussi depuis le `.env` du profil). Appels par l'ouvreur
+  gardé du plugin (`netguard`) avec `Authorization: Bearer <clé>`.
+- **Mode `local_embedded` sans `api_url`** : le démon embarqué n'a pas d'adresse
+  stable joignable ⇒ partie `failed` / `hindsight_embedded_unreachable`. Poser
+  `api_url` dans la config Hindsight si le démon écoute sur un port connu.
+- **Un export à la fois** (`busy`), hors de la boucle WebSocket, dans un
+  dossier temporaire supprimé dans tous les cas. Plafond 2 000 000 000 octets.
+- **Aucun contenu au journal** : seulement l'export, la partie et un code.
+
+**Diagnostic — « reste en préparation puis échoue (le bot n'a pas répondu) ».**
+Version réellement chargée (`hermes plugins list`, ≥ 1.24.0), espace disque du
+dossier temporaire (l'archive y est construite en entier), joignabilité de
+l'API Hindsight depuis le bot.
 
 ### Navigateur des agents (fournisseur `pulse`, `pulse_browser_handoff`)
 

@@ -103,6 +103,7 @@ from .audio_stream import (
 from . import browser as browser_provider
 from .capabilities import collect_capabilities
 from . import credentials as credentials_relay
+from . import memory_export as memory_export_relay
 from .connectors import (
     ConnectorCapabilityError,
     build_connector_payload,
@@ -571,6 +572,9 @@ class PulseChatAdapter(BasePlatformAdapter):
         # Taches de commandes d'identifiants en vol — gardees pour ne pas etre
         # ramassees en plein vol (asyncio ne garde qu'une reference faible).
         self._credential_tasks: "set[asyncio.Task]" = set()
+        # Export de la memoire (docs/68 de l'app) : un seul a la fois — un
+        # second ``memory.export`` pendant le premier est refuse ``busy``.
+        self._memory_export_busy: bool = False
         # Derniere source par canal — cle de session d'une interruption.
         self._last_source: Dict[str, Any] = {}
         # Type du DERNIER message entrant par canal (True = VOICE). Lu par
@@ -831,6 +835,17 @@ class PulseChatAdapter(BasePlatformAdapter):
                 features.append(credentials_relay.CREDENTIALS_FEATURE)
             capabilities["features"] = features
 
+        # Export de la memoire (docs/68 de l'app) : annonce des que le
+        # HERMES_HOME d'Hermes est lisible — la memoire integree et
+        # ``state.db`` existent dans toute image ; une partie absente est DITE
+        # dans le manifeste, jamais devinee ici.
+        if memory_export_relay.memory_export_available():
+            capabilities = dict(capabilities or {})
+            features = [f for f in capabilities.get("features") or [] if isinstance(f, str)]
+            if memory_export_relay.MEMORY_EXPORT_FEATURE not in features:
+                features.append(memory_export_relay.MEMORY_EXPORT_FEATURE)
+            capabilities["features"] = features
+
         # Connaissance du client (Bot Factory) : annoncee SEULEMENT quand les
         # outils ont ete enregistres — Pulse sait alors dire « recherche
         # absente » a qui attend un bot qui connait son client (image du plugin
@@ -976,6 +991,10 @@ class PulseChatAdapter(BasePlatformAdapter):
                     # executee HORS de la boucle de reception — le coffre est
                     # synchrone, et un gestionnaire externe peut etre lent.
                     self._spawn_credentials(self._handle_credentials_command(data))
+                elif data.get("type") == "memory.export":
+                    # Export de la memoire : disque, SQLite et HTTP, longs —
+                    # HORS de la boucle de reception, comme les identifiants.
+                    self._spawn_credentials(self._handle_memory_export(data))
                 elif data.get("type") == "browser.control":
                     # Resout la Future d'un outil ``pulse_browser_handoff`` qui
                     # attend dans un AUTRE fil — ou, si plus personne n'attend,
@@ -2793,6 +2812,143 @@ class PulseChatAdapter(BasePlatformAdapter):
             "ok" if result.get("ok") else result.get("code"),
             status,
         )
+
+    # ── Export de la memoire (docs/68 de l'app, Data Act) ───────────────
+    #
+    # PUR TRANSPORT : ``memory_export.py`` assemble, l'app decide qui exporte et
+    # garde la trace. L'archive part DIRECTEMENT au stockage objet par le lien
+    # d'ecriture signe (taille et type signes) — jamais par l'app, jamais avec
+    # l'en-tete ``Authorization`` de l'app. Aucun contenu au journal.
+
+    def _memory_export_url(self, export_id: str, action: str) -> str:
+        return "%s/api/agent/memory-exports/%s/%s" % (
+            self.base_url.rstrip("/"),
+            urllib.parse.quote(export_id, safe=""),
+            action,
+        )
+
+    def _post_memory_export(self, export_id: str, action: str, payload: Dict[str, Any]) -> Tuple[int, Any]:
+        return self._http_detailed(
+            "POST",
+            self._memory_export_url(export_id, action),
+            body=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    @staticmethod
+    def _hindsight_fetch(url: str, headers: Dict[str, str]) -> Tuple[int, Any]:
+        """GET JSON vers l'API Hindsight du bot — par l'ouvreur garde."""
+        request = urllib.request.Request(url, headers=dict(headers), method="GET")
+        try:
+            with _urlopen(request, timeout=120) as response:
+                raw = response.read()
+                status = int(response.status)
+        except urllib.error.HTTPError as exc:
+            return int(exc.code), None
+        except Exception as exc:
+            logger.warning("Pulse Chat: export de memoire — Hindsight injoignable (%s)", type(exc).__name__)
+            return 0, None
+        try:
+            return status, json.loads(raw.decode("utf-8")) if raw else None
+        except (UnicodeDecodeError, ValueError):
+            return status, None
+
+    @staticmethod
+    def _put_presigned(url: str, archive: pathlib.Path, size: int) -> int:
+        """PUT de l'archive EN FLUX vers le lien signe. Statut, ``0`` si echec reseau."""
+        with archive.open("rb") as handle:
+            request = urllib.request.Request(
+                url,
+                data=handle,
+                headers={"Content-Type": memory_export_relay.CONTENT_TYPE, "Content-Length": str(size)},
+                method="PUT",
+            )
+            try:
+                with _urlopen(request, timeout=UPLOAD_TIMEOUT_SECONDS) as response:
+                    return int(response.status)
+            except urllib.error.HTTPError as exc:
+                return int(exc.code)
+            except Exception as exc:
+                logger.warning("Pulse Chat: export de memoire — depot en echec (%s)", type(exc).__name__)
+                return 0
+
+    def _build_memory_archive(self, profile: str, parts: List[str], workdir: pathlib.Path):
+        from .capabilities import _read_plugin_version, detect_hermes_version
+
+        with memory_export_relay.hermes_context(profile) as (home, config):
+            return memory_export_relay.assemble(
+                home=home,
+                config=config,
+                env=memory_export_relay.profile_env(home),
+                parts=parts,
+                workdir=workdir,
+                fetch=self._hindsight_fetch,
+                profile=profile,
+                versions={"hermesVersion": detect_hermes_version(), "pluginVersion": _read_plugin_version()},
+                shared_home=pathlib.Path.home(),
+            )
+
+    async def _handle_memory_export(self, data: Dict[str, Any]) -> None:
+        export_id = str(data.get("exportId") or "")
+        if not export_id:
+            return
+        if self._memory_export_busy:
+            await asyncio.to_thread(
+                self._post_memory_export, export_id, "fail", {"code": memory_export_relay.FAIL_BUSY}
+            )
+            return
+        self._memory_export_busy = True
+        profile = str(data.get("profile") or (self.profiles[0] if self.profiles else ""))
+        parts = memory_export_relay.requested_parts(data.get("parts"))
+        try:
+            with tempfile.TemporaryDirectory(prefix="pulse-memory-export-") as tmp:
+                code = await self._export_memory(export_id, profile, parts, pathlib.Path(tmp))
+            if code is not None:
+                await asyncio.to_thread(self._post_memory_export, export_id, "fail", {"code": code})
+            logger.info("Pulse Chat: export de memoire %s — %s", export_id, code or "depose")
+        finally:
+            self._memory_export_busy = False
+
+    async def _export_memory(
+        self, export_id: str, profile: str, parts: List[str], workdir: pathlib.Path
+    ) -> Optional[str]:
+        """Assemble, depose, declare la fin. Rend le code d'echec, ou ``None``."""
+        try:
+            archive, manifest = await asyncio.to_thread(self._build_memory_archive, profile, parts, workdir)
+        except Exception as exc:
+            logger.warning("Pulse Chat: export de memoire — assemblage en echec (%s)", type(exc).__name__)
+            return memory_export_relay.FAIL_BUILD
+        if archive is None:
+            return memory_export_relay.FAIL_BUILD
+        size = archive.stat().st_size
+        if size > memory_export_relay.MAX_ARCHIVE_BYTES:
+            return memory_export_relay.FAIL_TOO_LARGE
+        digest = await asyncio.to_thread(memory_export_relay.sha256_of, archive)
+        status, body = await asyncio.to_thread(
+            self._post_memory_export,
+            export_id,
+            "upload-url",
+            {"sizeBytes": size, "contentType": memory_export_relay.CONTENT_TYPE},
+        )
+        if status == 413:
+            return memory_export_relay.FAIL_TOO_LARGE
+        url = body.get("url") if status == 200 and isinstance(body, dict) else None
+        if not isinstance(url, str) or not url:
+            return memory_export_relay.FAIL_UPLOAD
+        put_status = await asyncio.to_thread(self._put_presigned, url, archive, size)
+        if not 200 <= put_status < 300:
+            return memory_export_relay.FAIL_UPLOAD
+        status, _ = await asyncio.to_thread(
+            self._post_memory_export,
+            export_id,
+            "complete",
+            {"sizeBytes": size, "sha256": digest, "manifest": manifest},
+        )
+        if status != 200:
+            # L'app a constate un ecart (``upload_mismatch``) ou l'export n'est
+            # plus en cours : elle a deja tranche, rien a declarer de plus.
+            logger.warning("Pulse Chat: export de memoire %s — fin refusee (HTTP %s)", export_id, status)
+        return None
 
     async def _handle_browser_control(self, data: Dict[str, Any]) -> None:
         """Trame ``browser.control`` : reveille l'outil qui attend, ou RELANCE l'agent.
