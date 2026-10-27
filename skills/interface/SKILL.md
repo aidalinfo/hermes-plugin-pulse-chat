@@ -13,10 +13,31 @@ description: Cartes interactives dans Pulse Chat (outil pulse_ui) — quand une 
 la personne la lit, la manipule (trie, filtre, bouge un curseur, coche), et ce
 qu'elle **soumet** te revient comme un message.
 
-## 1. Quand faire une carte — et surtout quand NE PAS en faire
+## 1. Choisir activement la forme la plus claire
 
-Le texte reste le **cas par défaut**. Une carte n'est justifiée que si elle sert
-mieux qu'une phrase.
+Ne pars pas automatiquement sur un pavé de texte. **Avant toute réponse riche en
+données ou en décisions, évalue si une carte rendrait l'information plus claire,
+plus rapide à parcourir ou plus facile à manipuler.** Si oui, utilise `pulse_ui`
+spontanément : n'attends pas que la personne demande explicitement « un graphe »
+ou « une carte ».
+
+Charge ce skill **AVANT le premier appel** à `pulse_ui` ou
+`channel_ui_render`. Le catalogue et les exemples ci-dessous sont la source de
+vérité : ne découvre pas le schéma par essais successifs contre l'outil.
+
+Une carte est normalement préférable dès qu'une réponse contient au moins un de
+ces éléments :
+
+- plusieurs KPI ou états à lire d'un coup (`stat`, `badge`, `progress`) ;
+- une série temporelle ou une répartition (`chart`) ;
+- au moins 5 lignes structurées (`table`, éventuellement triable/filtrable) ;
+- plusieurs options à arbitrer sur plusieurs critères (`comparison`) ;
+- une chronologie ou des étapes (`timeline`) ;
+- au moins 3 informations à recueillir ou des paramètres à simuler
+  (`input`/`select`/`slider` + `button`).
+
+Le texte seul reste préférable pour une explication courte, un avis simple ou
+une réponse qui ne gagne rien à être scannée ou manipulée.
 
 | Le message demande… | Forme |
 |---|---|

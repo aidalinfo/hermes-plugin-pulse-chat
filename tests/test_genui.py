@@ -39,9 +39,26 @@ class TestSchema:
     def test_le_skill_existe(self):
         import pathlib
 
-        path = pathlib.Path(genui.__file__).resolve().parent / "skills" / genui.UI_SKILL_NAME / "SKILL.md"
+        module_file = genui.__file__
+        assert module_file is not None
+        path = pathlib.Path(module_file).resolve().parent / "skills" / genui.UI_SKILL_NAME / "SKILL.md"
         assert path.is_file()
-        assert path.read_text(encoding="utf-8").startswith("---\nname: interface\n")
+        skill = path.read_text(encoding="utf-8")
+        assert skill.startswith("---\nname: interface\n")
+        assert "Avant toute réponse riche en" in skill
+        assert "n'attends pas que la personne demande explicitement" in skill
+        assert "ne découvre pas le schéma par essais successifs" in skill
+
+    def test_le_guide_demande_devaluer_linterface_avant_un_texte_dense(self):
+        import pathlib
+
+        module_file = genui.__file__
+        assert module_file is not None
+        path = pathlib.Path(module_file).resolve().parent / "skills" / "guide" / "SKILL.md"
+        guide = path.read_text(encoding="utf-8")
+        assert "Avant de produire un" in guide
+        assert "charge `pulse-chat:interface`" in guide
+        assert "sans attendre que l'humain réclame explicitement" in guide
 
 
 class TestPayload:
