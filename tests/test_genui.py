@@ -35,6 +35,9 @@ class TestSchema:
         assert "pulse-chat:interface" in genui.UI_TOOL_DESCRIPTION
         for kind in ("table", "chart", "comparison", "slider", "button"):
             assert kind in genui.UI_TOOL_DESCRIPTION
+        assert "spontanement" in genui.UI_TOOL_DESCRIPTION
+        assert "JAMAIS un document vide" in genui.UI_TOOL_DESCRIPTION
+        assert "root:'root'" in genui.UI_TOOL_DESCRIPTION
 
     def test_le_skill_existe(self):
         import pathlib
@@ -85,6 +88,9 @@ class TestPayload:
             {"op": "delete", "surface_id": "a"},
             {"op": "render", "surface_id": "Avec Espace", "document": {}},
             {"op": "render", "surface_id": "a"},
+            {"op": "render", "surface_id": "a", "document": {}},
+            {"op": "render", "surface_id": "a", "document": {"title": "x", "root": "root", "components": []}},
+            {"op": "render", "surface_id": "a", "document": {"title": "x", "root": "root", "components": [{"id": "autre", "type": "text"}]}},
             {"op": "patch", "surface_id": "a", "patch": []},
             {"op": "patch", "surface_id": "a", "patch": [{}] * 101},
         ],

@@ -874,6 +874,16 @@ def _platform_hint(ctx):
     return ctx.platforms[-1]["platform_hint"]
 
 
+def test_hint_cartes_est_proactif_et_prevoit_le_repli_sans_skill():
+    ctx = _Ctx()
+    adapter_module.register(ctx)
+    hint = _platform_hint(ctx)
+    assert "proactively call pulse_ui" in hint
+    assert "never send an empty document" in hint
+    assert "title, root, and a non-empty components list" in hint
+    adapter_module.browser_provider.deactivate()
+
+
 def _fake_config(monkeypatch, cfg, readonly=True):
     import types
 

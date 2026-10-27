@@ -4056,12 +4056,16 @@ def register(ctx):
             # Hermes n'annonce jamais un skill de plugin : sans ce paragraphe,
             # l'outil existe mais l'agent ne sait ni QUAND s'en servir, ni
             # qu'un catalogue l'attend (docs/66 de l'app).
-            "Interactive cards: when a card serves better than text (comparing "
-            "several options on several criteria, figures over time, a "
-            "calculation with parameters, collecting 3+ fields), call pulse_ui "
-            "to show a native interactive card (table, key figures, chart, "
-            "comparison, form, buttons). Plain text stays the default. Load the "
-            "skill pulse-chat:interface before your first card. What the human "
+            "Interactive cards: proactively call pulse_ui whenever a visual or "
+            "interactive structure makes the answer clearer, faster to scan, or "
+            "more actionable: tables for structured data, charts for trends or "
+            "breakdowns, comparisons for options, forms for collecting 3+ fields, "
+            "and simulators for calculations with parameters. The tool shows "
+            "a native interactive card (table, key figures, chart, "
+            "comparison, form, buttons). Keep plain text for short, linear answers. Load the "
+            "skill pulse-chat:interface before your first card. If that skill is "
+            "unavailable, do not block and never send an empty document: include "
+            "at least title, root, and a non-empty components list. What the human "
             "submits comes back to you as a message starting with "
             "[Interface : ...]. Never use a card to ask for approval "
             "(pulse_request_approval does that).\n\n"
