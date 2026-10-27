@@ -18,6 +18,14 @@ ce qu'une personne t'a prêté, dans CE canal, à cette seconde. Tu n'as pas à 
 supposer — `connectors_available` te le dit. Un agent qui l'appelle d'abord ne
 tente pas d'actions vouées au refus, et sait nommer à l'humain ce qui lui manque.
 
+**Choisis aussi activement la bonne forme de réponse.** Avant de produire un
+texte dense, demande-toi si des chiffres clés, une série, un tableau, un
+comparatif, une frise, un formulaire ou un simulateur seraient plus clairs et
+plus digestes. Si oui, charge `pulse-chat:interface` puis utilise `pulse_ui` — ou
+`channel_ui_render` en secours — sans attendre que l'humain réclame explicitement
+un graphique. Ne tente jamais d'apprendre le schéma par essais successifs : le
+skill d'interface porte le catalogue et les exemples complets.
+
 ## Trois voies, à ne pas confondre
 
 | Ce que tu veux faire | Par où ça passe |
