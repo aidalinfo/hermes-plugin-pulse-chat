@@ -66,11 +66,13 @@ COMPONENT_TYPES = (
 UI_TOOL_DESCRIPTION = (
     "Affiche une CARTE INTERACTIVE dans la conversation Pulse Chat en cours : "
     "tableau triable, chiffres cles, graphique, comparatif d'options, frise, "
-    "formulaire, simulateur avec formules, boutons. A utiliser quand une carte "
-    "sert MIEUX que du texte : comparer plusieurs options sur plusieurs "
-    "criteres, montrer des chiffres qui evoluent, faire un calcul avec des "
-    "parametres, recueillir 3 champs ou plus. Sinon, reponds en texte (cas par "
-    "defaut). JAMAIS pour demander une validation avant d'agir "
+    "formulaire, simulateur avec formules, boutons. Utilise-la spontanement "
+    "quand une structure visuelle ou interactive rend la reponse plus claire, "
+    "plus rapide a parcourir ou plus actionnable : table pour des donnees "
+    "structurees, chart pour une evolution ou une repartition, comparison pour "
+    "des options, formulaire pour recueillir 3 champs ou plus, simulateur pour "
+    "un calcul parametre. Garde le texte pour une reponse courte et lineaire. "
+    "JAMAIS pour demander une validation avant d'agir "
     "(pulse_request_approval) ni pour un document a garder (pulse_publish_artifact). "
     "op='render' pose (ou remplace, meme surface_id) la carte : `document` = "
     "{title, description?, root, components: [{id, type, ...}] (liste PLATE, "
@@ -82,7 +84,11 @@ UI_TOOL_DESCRIPTION = (
     "Ce que la personne soumet te revient comme un message `[Interface : ...]` "
     "avec les valeurs. Types : " + ", ".join(COMPONENT_TYPES) + ". "
     "CHARGE LE SKILL pulse-chat:interface AVANT ta premiere carte (catalogue, "
-    "regles, exemples). Un refus porte `issues` (chemin + valeurs permises) : "
+    "regles, exemples). Si le skill est indisponible, ne bloque pas et n'envoie "
+    "JAMAIS un document vide : pars au minimum de "
+    "{title:'...', root:'root', components:[{id:'root', type:'stack', children:['contenu']}, "
+    "{id:'contenu', type:'text', markdown:'...'}]}. "
+    "Un refus porte `issues` (chemin + valeurs permises) : "
     "corrige et renvoie la carte toi-meme. Le canal est celui de la "
     "conversation : tu ne le passes pas."
 )
@@ -173,6 +179,22 @@ def build_ui_payload(channel_slug: str, args: Dict[str, Any]) -> Dict[str, Any]:
             raise UiToolError(
                 "ui_spec_too_large",
                 "Carte trop lourde : resume les donnees ou decoupe en plusieurs cartes",
+            )
+        title = document.get("title")
+        root = document.get("root")
+        components = document.get("components")
+        if (
+            not isinstance(title, str)
+            or not title.strip()
+            or not isinstance(root, str)
+            or not root.strip()
+            or not isinstance(components, list)
+            or not components
+            or not any(isinstance(component, dict) and component.get("id") == root for component in components)
+        ):
+            raise UiToolError(
+                "invalid_request",
+                "`document` doit contenir title, root et une liste components non vide incluant le composant root",
             )
         payload["document"] = document
         text = args.get("text")
