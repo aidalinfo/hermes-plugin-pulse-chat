@@ -11,6 +11,7 @@ hermes-plugin/pulse-chat/
 ├── adapter.py          # PulseChatAdapter + register()
 ├── classification.py   # classification pure message/tool_event (0 dépendance hermes)
 ├── hello.py            # frame hello multi-profils pure (0 dépendance hermes)
+├── reconnect.py        # backoff et gigue de reconnexion (pur)
 ├── browser.py          # fournisseur de navigateur `pulse` + pulse_browser_handoff
 ├── podcast.py          # pulse_podcast : payload, résultats et refus (pur)
 ├── genui.py            # pulse_ui : cartes interactives, payload et refus (pur)
@@ -21,6 +22,7 @@ hermes-plugin/pulse-chat/
 ├── pilot_heartbeat.py  # battement de vie des cartes de pilotage (pur)
 ├── netguard.py         # garde-fous réseau : schémas, redirections, clair, journaux
 ├── skills/             # skills enregistrés (guide, interface, …)
+├── CHANGELOG.md         # historique des versions publiées
 └── tests/              # pytest (sans hermes installé)
 ```
 
@@ -74,6 +76,12 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
   (header `Authorization: Bearer <PULSE_CHAT_TOKEN>`), body JSON
   `{channelSlug, kind, content, raw, hermesMessageId, tool, phase, replyToHermesId}`
   avec `kind = 'message' | 'tool_event'`.
+- **Reconnexion (≥ 1.24.1)** : les délais nominaux `2, 5, 10, 30, 60,
+  120… s` portent une gigue uniforme de ±50 %, afin que plusieurs bots coupés
+  ensemble ne rouvrent pas tous leur session au même instant. Le rang du recul
+  survit à un handshake WebSocket accepté puis fermé : seule l'admission
+  `hello.ack` (ou un `disconnect()` volontaire) le remet à zéro. Au plafond,
+  le délai nominal reste 120 s et le délai tiré se situe entre 60 et 180 s.
 - **Classification** (`classification.py`, décision 3 du plan) :
   - `edit_message()` (tool progress accumulé) ⇒ **toujours** `tool_event`
     (upsert serveur par `hermesMessageId`) ;
