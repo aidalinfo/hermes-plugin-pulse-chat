@@ -11,6 +11,7 @@ hermes-plugin/pulse-chat/
 ├── adapter.py          # PulseChatAdapter + register()
 ├── classification.py   # classification pure message/tool_event (0 dépendance hermes)
 ├── hello.py            # frame hello multi-profils pure (0 dépendance hermes)
+├── reconnect.py        # backoff et gigue de reconnexion (pur)
 ├── browser.py          # fournisseur de navigateur `pulse` + pulse_browser_handoff
 ├── podcast.py          # pulse_podcast : payload, résultats et refus (pur)
 ├── genui.py            # pulse_ui : cartes interactives, payload et refus (pur)
@@ -21,6 +22,7 @@ hermes-plugin/pulse-chat/
 ├── pilot_heartbeat.py  # battement de vie des cartes de pilotage (pur)
 ├── netguard.py         # garde-fous réseau : schémas, redirections, clair, journaux
 ├── skills/             # skills enregistrés (guide, interface, …)
+├── CHANGELOG.md         # historique des versions publiées
 └── tests/              # pytest (sans hermes installé)
 ```
 
@@ -54,6 +56,40 @@ hermes plugins enable pulse-chat
 
 Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
 
+### Construire le livrable officiel
+
+Le livrable canonique d'une release est **uniquement** l'archive
+`hermes-plugin-pulse-chat-<version>.tar.gz`. Elle est construite depuis le
+commit exact de la release, avec un dossier racine versionné :
+
+```bash
+VERSION="$(python3 -c 'import pathlib, re; text = pathlib.Path("plugin.yaml").read_text(); print(re.search(r"^version: (\\S+)$", text, re.M).group(1))')"
+PREFIX="hermes-plugin-pulse-chat-${VERSION}/"
+ARCHIVE="hermes-plugin-pulse-chat-${VERSION}.tar.gz"
+
+git diff --quiet && git diff --cached --quiet
+git archive --format=tar --prefix="${PREFIX}" HEAD | gzip -n -9 > "${ARCHIVE}"
+sha256sum "${ARCHIVE}"
+```
+
+`git archive` fixe le contenu et les métadonnées à partir du commit ; `gzip -n`
+supprime du flux gzip le nom du fichier et l'horodatage qui dépendraient de la
+machine de construction. À commit, version de `plugin.yaml` et outils identiques,
+le SHA-256 obtenu doit donc être identique, quel que soit le fuseau horaire.
+Pour le vérifier avant publication :
+
+```bash
+for TZ in UTC Pacific/Honolulu; do
+  TZ="$TZ" git archive --format=tar --prefix="${PREFIX}" HEAD \
+    | TZ="$TZ" gzip -n -9 > "${ARCHIVE}.${TZ##*/}"
+done
+sha256sum "${ARCHIVE}.UTC" "${ARCHIVE}.Honolulu"
+cmp "${ARCHIVE}.UTC" "${ARCHIVE}.Honolulu"
+```
+
+Un ZIP éventuellement généré pour un usage ponctuel n'est **pas** un artefact de
+release et ne doit pas être publié comme livrable canonique.
+
 ## Fonctionnement
 
 - **app → plugin** : WebSocket `ws(s)://<PULSE_CHAT_URL>/ws/hermes` (header
@@ -74,6 +110,12 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
   (header `Authorization: Bearer <PULSE_CHAT_TOKEN>`), body JSON
   `{channelSlug, kind, content, raw, hermesMessageId, tool, phase, replyToHermesId}`
   avec `kind = 'message' | 'tool_event'`.
+- **Reconnexion (≥ 1.24.1)** : les délais nominaux `2, 5, 10, 30, 60,
+  120… s` portent une gigue uniforme de ±50 %, afin que plusieurs bots coupés
+  ensemble ne rouvrent pas tous leur session au même instant. Le rang du recul
+  survit à un handshake WebSocket accepté puis fermé : seule l'admission
+  `hello.ack` (ou un `disconnect()` volontaire) le remet à zéro. Au plafond,
+  le délai nominal reste 120 s et le délai tiré se situe entre 60 et 180 s.
 - **Classification** (`classification.py`, décision 3 du plan) :
   - `edit_message()` (tool progress accumulé) ⇒ **toujours** `tool_event`
     (upsert serveur par `hermesMessageId`) ;

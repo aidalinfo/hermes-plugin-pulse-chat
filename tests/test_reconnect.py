@@ -11,6 +11,7 @@ S'executent SANS hermes installe (stubs gateway.* de test_adapter_dedup).
 
 import asyncio
 import importlib.util
+import random
 import sys
 import types
 from pathlib import Path
@@ -40,13 +41,34 @@ reconnect = _load_reconnect_module()
 
 
 def test_reconnect_delay_progression_puis_plafond():
-    delays = [reconnect.reconnect_delay(n) for n in range(1, 9)]
+    delays = [reconnect.reconnect_delay(n, rng=lambda: 0.5) for n in range(1, 9)]
     assert delays == [2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 120.0, 120.0]
+    assert [reconnect.nominal_delay(n) for n in range(1, 9)] == delays
 
 
 def test_reconnect_delay_attempt_invalide():
-    assert reconnect.reconnect_delay(0) == 0.0
-    assert reconnect.reconnect_delay(-3) == 0.0
+    def forbidden_rng():
+        raise AssertionError("le RNG ne doit pas etre appele pour un rang invalide")
+
+    assert reconnect.reconnect_delay(0, rng=forbidden_rng) == 0.0
+    assert reconnect.reconnect_delay(-3, rng=forbidden_rng) == 0.0
+
+
+def test_reconnect_delay_gigue_bornee_a_50_pourcent():
+    assert reconnect.reconnect_delay(1, rng=lambda: 0.0) == 1.0
+    assert reconnect.reconnect_delay(1, rng=lambda: 1.0) == 3.0
+    assert reconnect.reconnect_delay(6, rng=lambda: 0.0) == 60.0
+    assert reconnect.reconnect_delay(6, rng=lambda: 1.0) == 180.0
+
+
+def test_reconnect_delay_etale_deterministement_plusieurs_clients():
+    rng = random.Random(533)
+    delays = [reconnect.reconnect_delay(1, rng=rng.random) for _ in range(20)]
+
+    assert min(delays) >= 1.0
+    assert max(delays) <= 3.0
+    assert max(delays) - min(delays) > 1.0
+    assert len({round(delay, 6) for delay in delays}) == 20
 
 
 def test_handshake_status_websockets_moderne():
@@ -130,6 +152,70 @@ def test_boucle_abandonne_sur_non_retryable(monkeypatch):
     assert notified == [1], "le gateway doit etre prevenu quand on abandonne"
 
 
+def test_rang_survit_aux_connexions_sans_hello_ack(monkeypatch):
+    adapter = _make_adapter()
+    seen = []
+
+    async def fake_connect(*, is_reconnect=False):
+        adapter._last_connect_retryable = True
+        return True
+
+    adapter.connect = fake_connect
+    monkeypatch.setattr(adapter_module, "reconnect_delay", lambda n: seen.append(n) or 0.0)
+
+    asyncio.run(adapter._reconnect_loop())
+    asyncio.run(adapter._reconnect_loop())
+    asyncio.run(adapter._reconnect_loop())
+
+    assert seen == [1, 2, 3]
+
+
+def test_hello_ack_remet_le_rang_a_zero_meme_sans_jeton(monkeypatch):
+    adapter = _make_adapter()
+    seen = []
+
+    async def fake_connect(*, is_reconnect=False):
+        adapter._last_connect_retryable = True
+        return True
+
+    adapter.connect = fake_connect
+    monkeypatch.setattr(adapter_module, "reconnect_delay", lambda n: seen.append(n) or 0.0)
+
+    asyncio.run(adapter._reconnect_loop())
+    asyncio.run(adapter._reconnect_loop())
+    adapter._handle_hello_ack({"type": "hello.ack"})
+    asyncio.run(adapter._reconnect_loop())
+
+    assert seen == [1, 2, 1]
+
+
+def test_rangs_de_reconnexion_sont_independants_entre_clients(monkeypatch):
+    first = _make_adapter()
+    second = _make_adapter()
+    seen = []
+
+    async def first_connect(*, is_reconnect=False):
+        first._last_connect_retryable = True
+        return True
+
+    async def second_connect(*, is_reconnect=False):
+        second._last_connect_retryable = True
+        return True
+
+    first.connect = first_connect
+    second.connect = second_connect
+    monkeypatch.setattr(adapter_module, "reconnect_delay", lambda n: seen.append(n) or 0.0)
+
+    asyncio.run(first._reconnect_loop())
+    asyncio.run(first._reconnect_loop())
+    asyncio.run(second._reconnect_loop())
+    first._handle_hello_ack({"type": "hello.ack", "sessionToken": "jeton"})
+    asyncio.run(first._reconnect_loop())
+    asyncio.run(second._reconnect_loop())
+
+    assert seen == [1, 2, 1, 1, 2]
+
+
 def test_coupure_ws_declenche_reconnexion_sans_fatal(monkeypatch):
     """Fin inattendue de la boucle de reception : reconnexion locale, PAS de
     _notify_fatal_error (c'est lui qui poussait le gateway a abandonner)."""
@@ -173,6 +259,7 @@ def test_disconnect_volontaire_annule_la_reconnexion():
 
     async def run():
         started = asyncio.Event()
+        adapter._reconnect_attempt = 4
 
         async def endless_loop():
             started.set()
@@ -182,5 +269,6 @@ def test_disconnect_volontaire_annule_la_reconnexion():
         await started.wait()
         await adapter.disconnect()
         assert adapter._reconnect_task is None
+        assert adapter._reconnect_attempt == 0
 
     asyncio.run(run())

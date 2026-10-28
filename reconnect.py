@@ -10,24 +10,32 @@ backoff defini ici.
 
 from __future__ import annotations
 
-from typing import Optional
+import random
+from typing import Callable, Optional
 
 # Progression volontairement courte au debut (un deploiement dure quelques
 # secondes) puis plafonnee : la boucle insiste indefiniment sans marteler.
 _DELAYS = (2.0, 5.0, 10.0, 30.0, 60.0)
 _DELAY_CAP = 120.0
+_JITTER = 0.5
 
 
-def reconnect_delay(attempt: int) -> float:
-    """Delai (secondes) avant la tentative ``attempt`` (1-based).
-
-    ``attempt <= 0`` vaut 0 (tolerance aux appels degeneres).
-    """
+def nominal_delay(attempt: int) -> float:
+    """Delai nominal avant la tentative ``attempt`` (1-based)."""
     if attempt <= 0:
         return 0.0
     if attempt <= len(_DELAYS):
         return _DELAYS[attempt - 1]
     return _DELAY_CAP
+
+
+def reconnect_delay(attempt: int, rng: Optional[Callable[[], float]] = None) -> float:
+    """Delai avec gigue uniforme de +/- 50 %, injectable pour les tests."""
+    base = nominal_delay(attempt)
+    if base <= 0:
+        return 0.0
+    draw = (rng or random.random)()
+    return base * (1.0 - _JITTER + 2.0 * _JITTER * draw)
 
 
 def handshake_status(exc: BaseException) -> Optional[int]:

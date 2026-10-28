@@ -591,6 +591,9 @@ class PulseChatAdapter(BasePlatformAdapter):
         # Reconnexion auto-pilotee (le gateway ne retente qu'une fois — cf.
         # reconnect.py) : tache de boucle + retryabilite du dernier echec.
         self._reconnect_task: Optional[asyncio.Task] = None
+        # Rang conserve jusqu'a l'admission par ``hello.ack`` : un handshake
+        # accepte puis ferme avant admission ne doit pas ramener le recul a 2 s.
+        self._reconnect_attempt: int = 0
         self._last_connect_retryable: bool = True
         self._media_dir: Optional[str] = None
         # Cache borne (FIFO) des derniers message ids traites — dedup du rejeu.
@@ -704,6 +707,7 @@ class PulseChatAdapter(BasePlatformAdapter):
 
     def _handle_hello_ack(self, data: Dict[str, Any]) -> None:
         """Trame ``hello.ack`` -> memorisation du jeton (sans interpretation)."""
+        self._reconnect_attempt = 0
         token = session_token_from_ack(data)
         if token is None:
             # Serveur qui n'emet pas de jeton : on continue sans identite.
@@ -898,6 +902,7 @@ class PulseChatAdapter(BasePlatformAdapter):
         """Arret propre : marque deconnecte, annule les boucles, ferme le WS."""
         self._mark_disconnected()
         self._abort_open_audio_streams()
+        self._reconnect_attempt = 0
 
         reconnect_task, self._reconnect_task = self._reconnect_task, None
         if reconnect_task and not reconnect_task.done():
@@ -1109,15 +1114,17 @@ class PulseChatAdapter(BasePlatformAdapter):
 
         S'arrete : au succes, ou sur un echec non-retryable (token invalide,
         config) — seul cas ou le fatal est notifie au gateway.
+
+        Le rang n'est remis a zero que par ``hello.ack`` ou un arret volontaire.
         """
-        attempt = 0
         while True:
-            attempt += 1
+            self._reconnect_attempt += 1
+            attempt = self._reconnect_attempt
             delay = reconnect_delay(attempt)
             if delay:
                 await asyncio.sleep(delay)
             logger.warning(
-                "Pulse Chat: tentative de reconnexion %d (delai %.0fs)", attempt, delay
+                "Pulse Chat: tentative de reconnexion %d (delai %.1fs)", attempt, delay
             )
             try:
                 if await self.connect(is_reconnect=True):
