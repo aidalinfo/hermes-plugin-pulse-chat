@@ -60,8 +60,11 @@ def _capture_resolutions(monkeypatch):
     """
     resolutions = []
 
-    def fake_resolve(session_key, choice, resolve_all=False, reason=None):
-        resolutions.append((session_key, choice))
+    def fake_resolve(session_key, choice, resolve_all=False, reason=None, **kwargs):
+        if "request_id" in kwargs:
+            resolutions.append((session_key, choice, kwargs["request_id"]))
+        else:
+            resolutions.append((session_key, choice))
         return 1
 
     monkeypatch.setattr(adapter_module, "resolve_gateway_approval", fake_resolve)
@@ -446,3 +449,84 @@ def test_reemission_du_meme_request_id_est_debloquee_par_la_reponse():
         assert adapter._pending_approvals == {}
 
     asyncio.run(run())
+
+
+class TestLiaisonExacte:
+    """hermes-agent#136199 (issue #133514, Pulse Chat #412) : une session de
+    messagerie a un proprietaire d'approbation, et Hermes ne rend une carte que
+    si l'adaptateur sait la lier a la demande EXACTE. Sans cela, la carte
+    devient une invite texte, et une decision sans ``request_id`` est ignoree.
+    """
+
+    def test_la_liaison_est_declaree_sur_la_CLASSE_elle_meme(self):
+        # Copie du test d'Hermes (``run_turn_runner_approval_transport.py``) :
+        # ``type(adapter).__dict__.get(...) is not True`` ⇒ invite texte.
+        cls = adapter_module.PulseChatAdapter
+        assert cls.__dict__.get("supports_exec_approval_request_binding") is True
+
+    def test_la_decision_rend_l_identifiant_d_Hermes(self, monkeypatch):
+        async def run():
+            resolutions = _capture_resolutions(monkeypatch)
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(
+                chat_id="demo", command="ls", session_key="sess-7", request_id="hreq-123"
+            )
+            # L'app recoit SON identifiant, jamais celui d'Hermes.
+            assert posted[0]["requestId"].startswith("req-")
+            assert posted[0]["requestId"] != "hreq-123"
+
+            adapter._handle_approval_reply(_reply_frame(posted[0]["requestId"], "once"))
+
+            assert resolutions == [("sess-7", "once", "hreq-123")]
+            assert adapter._gateway_approvals == {}
+
+        asyncio.run(run())
+
+    def test_deux_demandes_de_la_meme_session_restent_distinctes(self, monkeypatch):
+        # Le cas du sous-agent : deux demandes en attente sur une session ;
+        # trancher la seconde ne doit pas trancher la premiere (FIFO).
+        async def run():
+            resolutions = _capture_resolutions(monkeypatch)
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(
+                chat_id="demo", command="a", session_key="sess-1", request_id="h-1"
+            )
+            await adapter.send_exec_approval(
+                chat_id="demo", command="b", session_key="sess-1", request_id="h-2"
+            )
+            adapter._handle_approval_reply(_reply_frame(posted[1]["requestId"], "deny"))
+            assert resolutions == [("sess-1", "deny", "h-2")]
+            assert len(adapter._gateway_approvals) == 1
+
+        asyncio.run(run())
+
+    def test_un_Hermes_sans_liaison_garde_l_ancien_appel(self, monkeypatch):
+        # Hermes actuel : ni ``request_id`` a l'envoi, ni parametre du meme nom
+        # dans ``resolve_gateway_approval`` — le lui passer leverait TypeError.
+        async def run():
+            calls = []
+
+            def old_resolve(session_key, choice, resolve_all=False, reason=None):
+                calls.append((session_key, choice))
+                return 1
+
+            monkeypatch.setattr(adapter_module, "resolve_gateway_approval", old_resolve)
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(chat_id="demo", command="ls", session_key="s")
+            adapter._handle_approval_reply(_reply_frame(posted[0]["requestId"], "once"))
+            assert calls == [("s", "once")]
+
+        asyncio.run(run())
+
+    def test_un_argument_inconnu_ne_casse_pas_la_carte(self, monkeypatch):
+        # Un ``TypeError`` ici ferait reprendre l'invite texte par Hermes.
+        async def run():
+            _capture_resolutions(monkeypatch)
+            adapter, posted = _make_adapter()
+            result = await adapter.send_exec_approval(
+                chat_id="demo", command="ls", session_key="s", request_id="h", futur=True
+            )
+            assert result.success is True
+            assert len(posted) == 1
+
+        asyncio.run(run())

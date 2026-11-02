@@ -602,8 +602,10 @@ class PulseChatAdapter(BasePlatformAdapter):
         # Approbations issues du GARDE-FOU d'Hermes : requestId -> session_key.
         # Rien a debloquer ici — c'est Hermes qui tient le thread agent bloque,
         # et c'est ``resolve_gateway_approval`` qui le relache. On ne garde donc
-        # que de quoi retrouver la session au retour de la decision.
-        self._gateway_approvals: "OrderedDict[str, str]" = OrderedDict()
+        # que de quoi retrouver la session au retour de la decision, et
+        # l'identifiant de la demande chez Hermes quand il le donne (liaison
+        # exacte, cf. ``supports_exec_approval_request_binding``).
+        self._gateway_approvals: "OrderedDict[str, Tuple[str, Optional[str]]]" = OrderedDict()
         # Questions posees en CARTE : clarify_id -> channel_slug. Rien a
         # debloquer ici non plus — l'attente vit dans le process Hermes
         # (``tools/clarify_gateway``), et c'est ``resolve_gateway_clarify`` qui
@@ -2299,6 +2301,18 @@ class PulseChatAdapter(BasePlatformAdapter):
         """
         return True
 
+    #: Liaison EXACTE de la carte a la demande d'Hermes (hermes-agent#136199,
+    #: issue #133514, Pulse Chat #412). Avec cette PR, une session de
+    #: messagerie a un proprietaire d'approbation, et le runner ne rend une
+    #: carte que si la CLASSE de l'adaptateur declare cet attribut (lu par
+    #: ``type(adapter).__dict__``, donc ici et pas dans une classe parente) ;
+    #: sinon il poste son invite texte « /approve request:<id> ». En
+    #: contrepartie, ``send_exec_approval`` recoit ``request_id`` et la
+    #: decision doit le rendre a ``resolve_gateway_approval`` : une resolution
+    #: sans lui est ignoree en silence pour une telle demande. Un Hermes qui
+    #: ne connait pas l'attribut l'ignore et n'envoie pas de ``request_id``.
+    supports_exec_approval_request_binding = True
+
     async def send_exec_approval(
         self,
         chat_id: str,
@@ -2309,6 +2323,8 @@ class PulseChatAdapter(BasePlatformAdapter):
         allow_permanent: bool = True,
         allow_session: bool = True,
         smart_denied: bool = False,
+        request_id: Optional[str] = None,
+        **_ignored: Any,
     ) -> SendResult:
         """Rend le garde-fou d'Hermes sous forme de CARTE, pas d'invite texte.
 
@@ -2329,6 +2345,12 @@ class PulseChatAdapter(BasePlatformAdapter):
         exception : Hermes reprend alors SON invite texte. C'est la seule
         degradation acceptable — se taire laisserait l'humain devant un agent
         muet jusqu'a l'expiration du garde-fou.
+
+        ``request_id`` est l'identifiant de la demande CHEZ HERMES (liaison
+        exacte, cf. ``supports_exec_approval_request_binding``) ; il est garde
+        pour la resolution, jamais montre a l'app, qui recoit le sien.
+        ``**_ignored`` : un argument nomme qu'un Hermes plus recent ajouterait
+        ne doit pas faire echouer la carte (``TypeError`` = invite texte).
         """
         if resolve_gateway_approval is None:
             # Poster la carte sans pouvoir debloquer le thread agent serait pire
@@ -2340,6 +2362,7 @@ class PulseChatAdapter(BasePlatformAdapter):
             )
 
         command = command or description or "(commande non transmise)"
+        hermes_request_id = str(request_id) if request_id else None
         request_id = f"req-{uuid.uuid4().hex}"
         payload = build_approval_payload(
             channel_slug=str(chat_id),
@@ -2356,7 +2379,7 @@ class PulseChatAdapter(BasePlatformAdapter):
         # Correle AVANT de poster : l'app peut repondre avant que le POST ne
         # retourne (demande deja tranchee, rejouee telle quelle) et la trame
         # arriverait sans destinataire.
-        self._gateway_approvals[request_id] = str(session_key)
+        self._gateway_approvals[request_id] = (str(session_key), hermes_request_id)
         while len(self._gateway_approvals) > _MAX_GATEWAY_APPROVALS:
             self._gateway_approvals.popitem(last=False)
 
@@ -2380,9 +2403,19 @@ class PulseChatAdapter(BasePlatformAdapter):
         # Deux origines possibles, jamais les deux pour un meme requestId : le
         # garde-fou du gateway (l'attente vit chez Hermes) ou un appel explicite
         # a ``request_approval`` (l'attente vit ici).
-        session_key = self._gateway_approvals.pop(reply["requestId"], None)
-        if session_key is not None:
-            resolved = resolve_gateway_approval(session_key, reply["decision"])
+        gateway = self._gateway_approvals.pop(reply["requestId"], None)
+        if gateway is not None:
+            session_key, hermes_request_id = gateway
+            if hermes_request_id:
+                # Liaison exacte : seule cette demande est tranchee, jamais la
+                # plus ancienne de la session (FIFO), qui peut etre une autre.
+                resolved = resolve_gateway_approval(
+                    session_key, reply["decision"], request_id=hermes_request_id
+                )
+            else:
+                # Hermes sans liaison exacte : sa signature n'a peut-etre pas
+                # ``request_id``, on ne le passe donc pas.
+                resolved = resolve_gateway_approval(session_key, reply["decision"])
             if not resolved:
                 # Le garde-fou d'Hermes a son propre delai (300 s par defaut) :
                 # passe ce delai il a deja refuse, et le clic arrive trop tard.
