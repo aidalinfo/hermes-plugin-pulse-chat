@@ -21,7 +21,8 @@ le composeur — quand on pensait a deplier l'activite.
 Contrat (miroir de app/pulse-chat/shared/questions.ts) :
 
     plugin -> app   POST /api/agent/messages
-        {kind: "question_request", channelSlug, requestId, question, choices}
+        {kind: "question_request", channelSlug, requestId, question, choices,
+         expiresInSeconds}
         {kind: "question_retire",  channelSlug, requestId}
 
     app -> plugin   trame WS
@@ -51,6 +52,17 @@ MAX_CHOICES = 4
 MAX_CHOICE_LENGTH = 200
 MAX_QUESTION_LENGTH = 1000
 
+#: Champ du delai d'attente d'Hermes (``agent.clarify_timeout``), en secondes,
+#: annonce a l'app depuis 1.25.0 (#470 de l'app). L'app l'AFFICHE (« sans
+#: reponse vers HH:MM, la question sera retiree ») ; c'est toujours Hermes qui
+#: relache l'attente et retire la carte. Une app anterieure le refuse en 400
+#: (schema ``.strict()``) : l'adaptateur reposte alors sans lui
+#: (``legacy_question_payload``).
+EXPIRES_FIELD = "expiresInSeconds"
+
+#: Borne haute (30 jours, miroir de ``MAX_CLARIFY_TIMEOUT_SECONDS`` de l'app).
+MAX_CLARIFY_TIMEOUT_SECONDS = 30 * 24 * 3600
+
 
 def normalize_choices(choices: Optional[Iterable[Any]]) -> List[str]:
     """Borne les choix proposes, en conservant l'ORDRE.
@@ -78,11 +90,29 @@ def normalize_choices(choices: Optional[Iterable[Any]]) -> List[str]:
     return kept
 
 
+def normalize_clarify_timeout(raw: Any) -> Optional[int]:
+    """Delai d'Hermes en secondes entieres, ou ``None`` s'il n'y a rien a annoncer.
+
+    ``0`` (ou negatif) veut dire « attente illimitee » chez Hermes : aucune
+    echeance a afficher, donc rien d'annonce. Un booleen n'est pas un delai
+    (``True`` vaudrait 1 s en Python).
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    if raw != raw:  # NaN
+        return None
+    seconds = int(raw)
+    if seconds <= 0 or seconds > MAX_CLARIFY_TIMEOUT_SECONDS:
+        return None
+    return seconds
+
+
 def build_question_payload(
     channel_slug: str,
     request_id: str,
     question: str,
     choices: Optional[Iterable[Any]] = None,
+    expires_in_seconds: Any = None,
 ) -> Dict[str, Any]:
     """Construit le POST d'une question. PURE — aucune I/O.
 
@@ -101,7 +131,15 @@ def build_question_payload(
     cleaned = normalize_choices(choices)
     if cleaned:
         payload["choices"] = cleaned
+    timeout = normalize_clarify_timeout(expires_in_seconds)
+    if timeout is not None:
+        payload[EXPIRES_FIELD] = timeout
     return payload
+
+
+def legacy_question_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """La meme question SANS le delai, pour une app anterieure a ce champ."""
+    return {key: value for key, value in payload.items() if key != EXPIRES_FIELD}
 
 
 def build_question_retire_payload(channel_slug: str, request_id: str) -> Dict[str, Any]:

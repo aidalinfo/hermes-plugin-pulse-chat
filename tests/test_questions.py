@@ -123,3 +123,33 @@ class TestParseQuestionReply:
         doit pas en dependre."""
         parsed = questions.parse_question_reply(self._frame(answeredBy=None))
         assert parsed["answeredBy"] == {"userId": "", "userName": ""}
+
+
+class TestDelaiAnnonce:
+    """``expiresInSeconds`` : le delai d'Hermes, affiche par l'app (#470)."""
+
+    def test_normalise_un_delai_positif_borne(self):
+        assert questions.normalize_clarify_timeout(600) == 600
+        assert questions.normalize_clarify_timeout(3600.0) == 3600
+        # 0 = attente illimitee chez Hermes : pas d'echeance a annoncer.
+        assert questions.normalize_clarify_timeout(0) is None
+        assert questions.normalize_clarify_timeout(-1) is None
+        assert questions.normalize_clarify_timeout(True) is None
+        assert questions.normalize_clarify_timeout("600") is None
+        assert questions.normalize_clarify_timeout(float("nan")) is None
+        assert (
+            questions.normalize_clarify_timeout(questions.MAX_CLARIFY_TIMEOUT_SECONDS + 1)
+            is None
+        )
+
+    def test_le_payload_porte_le_delai_seulement_s_il_est_connu(self):
+        with_timeout = questions.build_question_payload("demo", "clr-1", "Q ?", None, 600)
+        assert with_timeout["expiresInSeconds"] == 600
+        without = questions.build_question_payload("demo", "clr-1", "Q ?", None, None)
+        assert "expiresInSeconds" not in without
+
+    def test_le_repli_retire_le_delai_et_rien_d_autre(self):
+        payload = questions.build_question_payload("demo", "clr-1", "Q ?", ["A", "B"], 600)
+        legacy = questions.legacy_question_payload(payload)
+        assert "expiresInSeconds" not in legacy
+        assert legacy == {k: v for k, v in payload.items() if k != "expiresInSeconds"}
