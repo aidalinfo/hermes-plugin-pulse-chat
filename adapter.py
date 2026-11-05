@@ -79,8 +79,11 @@ from .gates import (
     tool_result,
 )
 from .questions import (
+    EXPIRES_FIELD as QUESTION_EXPIRES_FIELD,
     build_question_payload,
     build_question_retire_payload,
+    legacy_question_payload,
+    normalize_clarify_timeout,
     parse_question_reply,
 )
 from .artifacts import (
@@ -282,6 +285,23 @@ except ImportError:  # pragma: no cover - Hermes trop ancien / hors gateway
     # entier. L'absence est traitee dans ``send_clarify``, qui rend alors la
     # main a Hermes pour qu'il reprenne son invite texte numerotee.
     resolve_gateway_clarify = None  # type: ignore[assignment]
+
+
+def read_clarify_timeout() -> Optional[int]:
+    """``agent.clarify_timeout`` tel qu'Hermes l'APPLIQUE, en secondes, ou ``None``.
+
+    Lu par ``tools.clarify_gateway.get_clarify_timeout`` — la fonction meme qui
+    arme l'attente —, jamais dans ``config.yaml`` : une image recente fait
+    passer l'ancienne cle ``clarify.timeout`` devant, et c'est la valeur
+    effective qui compte (docs/11 § 3 de l'app). Ne leve jamais : une image qui
+    n'expose pas la fonction n'annonce simplement rien.
+    """
+    try:
+        from tools.clarify_gateway import get_clarify_timeout
+
+        return normalize_clarify_timeout(get_clarify_timeout())
+    except Exception:
+        return None
 
 logger = logging.getLogger(__name__)
 
@@ -822,6 +842,14 @@ class PulseChatAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("Pulse Chat: collecte des capacites en echec — %s", exc)
             capabilities = None
+
+        # Delai des questions (#470 de l'app) : l'ecran des agents signale un
+        # bot sous 3600 s — a 600 s, une carte « question » meurt dix minutes
+        # apres avoir ete posee. Annonce meme sans fiche recoltee.
+        clarify_timeout = read_clarify_timeout()
+        if clarify_timeout is not None:
+            capabilities = dict(capabilities or {})
+            capabilities["clarifyTimeoutSeconds"] = clarify_timeout
 
         # Identifiants d'agent : la fonction n'est ANNONCEE que si le coffre
         # d'Hermes s'importe (Hermes >= v2026.9.11) — sinon l'app dit pourquoi
@@ -2474,6 +2502,9 @@ class PulseChatAdapter(BasePlatformAdapter):
             request_id=str(clarify_id),
             question=question,
             choices=choices,
+            # Le delai qu'Hermes APPLIQUE (#470 de l'app) : l'app dit a quelle
+            # heure la carte sera retiree, pour qu'on ne la decouvre pas morte.
+            expires_in_seconds=read_clarify_timeout(),
         )
         # Correle AVANT de poster : l'app peut repondre avant que le POST ne
         # retourne (question deja repondue, rejouee telle quelle) et la trame
@@ -2484,6 +2515,22 @@ class PulseChatAdapter(BasePlatformAdapter):
             self._clarify_cards.popitem(last=False)
 
         result = await self._post_agent_message(payload, str(clarify_id))
+        if (
+            not result.success
+            and QUESTION_EXPIRES_FIELD in payload
+            and str(getattr(result, "error", "") or "").startswith("HTTP 400")
+        ):
+            # App anterieure au delai annonce (schema ``.strict()``) : la carte
+            # passe AVANT l'echeance. Reposter une fois sans le champ ; un 400
+            # qui n'en venait pas retombe a l'identique, sans autre effet.
+            _warn_once(
+                "question_expires_400",
+                "Pulse Chat: l'app refuse le delai des questions (HTTP 400) — "
+                "carte reposte sans echeance ; mettre l'app a jour",
+            )
+            result = await self._post_agent_message(
+                legacy_question_payload(payload), str(clarify_id)
+            )
         if not result.success:
             self._clarify_cards.pop(str(clarify_id), None)
             logger.warning(

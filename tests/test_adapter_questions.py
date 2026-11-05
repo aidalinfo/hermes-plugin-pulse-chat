@@ -321,3 +321,110 @@ class TestRetireClarifyCard:
             await adapter.retire_clarify_card(CLARIFY_ID, "expired")
 
         asyncio.run(run())
+
+
+class TestDelaiAnnonce:
+    """Delai d'attente d'Hermes annonce a l'app (#470 de l'app, FB-0111)."""
+
+    def test_la_carte_porte_le_delai_qu_Hermes_applique(self, monkeypatch):
+        async def run():
+            _capture_resolutions(monkeypatch)
+            monkeypatch.setattr(adapter_module, "read_clarify_timeout", lambda: 600)
+            adapter, posted = _make_adapter()
+
+            result = await adapter.send_clarify(
+                chat_id="demo",
+                question="Quel niveau ?",
+                choices=CHOICES,
+                clarify_id=CLARIFY_ID,
+                session_key="sess-1",
+            )
+
+            assert result.success
+            assert posted[0]["expiresInSeconds"] == 600
+
+        asyncio.run(run())
+
+    def test_sans_delai_lisible_rien_n_est_annonce(self, monkeypatch):
+        async def run():
+            _capture_resolutions(monkeypatch)
+            monkeypatch.setattr(adapter_module, "read_clarify_timeout", lambda: None)
+            adapter, posted = _make_adapter()
+
+            await adapter.send_clarify(
+                chat_id="demo",
+                question="Quel niveau ?",
+                choices=CHOICES,
+                clarify_id=CLARIFY_ID,
+                session_key="sess-1",
+            )
+
+            assert "expiresInSeconds" not in posted[0]
+
+        asyncio.run(run())
+
+    def test_une_app_anterieure_recoit_la_carte_sans_le_delai(self, monkeypatch):
+        """400 ``.strict()`` : on reposte UNE fois sans le champ, la carte passe."""
+
+        async def run():
+            _capture_resolutions(monkeypatch)
+            monkeypatch.setattr(adapter_module, "read_clarify_timeout", lambda: 3600)
+            adapter = adapter_module.PulseChatAdapter(_Config())
+            posted = []
+
+            async def fake_post(payload, hermes_id):
+                posted.append(payload)
+                if "expiresInSeconds" in payload:
+                    return adapter_module.SendResult(success=False, error="HTTP 400: Bad Request")
+                return adapter_module.SendResult(success=True, message_id=hermes_id)
+
+            adapter._post_agent_message = fake_post
+
+            result = await adapter.send_clarify(
+                chat_id="demo",
+                question="Quel niveau ?",
+                choices=CHOICES,
+                clarify_id=CLARIFY_ID,
+                session_key="sess-1",
+            )
+
+            assert result.success
+            assert len(posted) == 2
+            assert "expiresInSeconds" not in posted[1]
+            assert posted[1]["requestId"] == CLARIFY_ID
+            # La carte reste correlee : la reponse et le retrait la retrouvent.
+            assert adapter._clarify_cards[CLARIFY_ID] == "demo"
+
+        asyncio.run(run())
+
+    def test_un_autre_echec_n_est_pas_reposte(self, monkeypatch):
+        """Un 503 n'est pas un champ inconnu : un seul POST, repli texte d'Hermes."""
+
+        async def run():
+            _capture_resolutions(monkeypatch)
+            monkeypatch.setattr(adapter_module, "read_clarify_timeout", lambda: 3600)
+            adapter = adapter_module.PulseChatAdapter(_Config())
+            posted = []
+
+            async def fake_post(payload, hermes_id):
+                posted.append(payload)
+                return adapter_module.SendResult(success=False, error="HTTP 503")
+
+            adapter._post_agent_message = fake_post
+
+            result = await adapter.send_clarify(
+                chat_id="demo",
+                question="Quel niveau ?",
+                choices=CHOICES,
+                clarify_id=CLARIFY_ID,
+                session_key="sess-1",
+            )
+
+            assert not result.success
+            assert len(posted) == 1
+
+        asyncio.run(run())
+
+    def test_lecture_du_delai_sans_Hermes_ne_leve_pas(self):
+        # Hors d'Hermes, ``tools.clarify_gateway`` n'existe pas.
+        assert adapter_module.read_clarify_timeout() is None

@@ -169,7 +169,8 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
 
   ```
   send_clarify(chat_id, question, choices, clarify_id, session_key)
-      -> POST {kind: "question_request", requestId: <clarify_id>, question, choices}
+      -> POST {kind: "question_request", requestId: <clarify_id>, question, choices,
+               expiresInSeconds}                # >= 1.25.0, delai d'Hermes
   retire_clarify_card(clarify_id, notice)      # Hermes a relâché son attente
       -> POST {kind: "question_retire", requestId: <clarify_id>}
   _handle_question_reply(frame)                # trame WS question.reply
@@ -185,6 +186,18 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
   soi-même, ce serait deux invites pour une question. Sans `tools.clarify_gateway`
   (Hermes trop ancien), la carte n'est pas postée du tout : des boutons qu'on ne
   saurait pas dénouer figeraient l'agent.
+
+  **Délai annoncé (≥ 1.25.0).** Hermes relâche son attente au bout de
+  `agent.clarify_timeout` (600 s sur une v0.16, 3600 s par défaut depuis
+  v2026.9.24) et retire la carte. Le plugin lit la valeur qu'Hermes **applique**
+  (`tools.clarify_gateway.get_clarify_timeout`, jamais le `config.yaml` à la
+  main) et l'annonce deux fois : `expiresInSeconds` sur la question — la carte
+  dit « sans réponse vers HH:MM, la question sera retirée » —, et
+  `clarifyTimeoutSeconds` dans la fiche de capacités du `hello` — /admin/agents
+  signale un bot sous 3600 s. `0` (attente illimitée) n'est pas annoncé. Le délai
+  se règle toujours dans le bot (docs/11 § 3 de l'app) : le plugin ne le modifie
+  pas. Une app antérieure refuse le champ (`.strict()`, 400) : la carte est
+  repostée une fois sans lui.
 
 ### Faire valider un plan ou un livrable (`pulse_request_approval`)
 
