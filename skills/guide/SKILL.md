@@ -94,7 +94,16 @@ envoie tes points avec l'outil MCP `channel_dashboard_push`
 `stat`, `gauge`, `timeseries`, `bar`, `uptime`, `status`, `table`, `text`,
 `html` (sur mesure, sans réseau, données par `pulse.onData(fn)`). Même contrat
 que pour un fichier : écris le `.json` avec `pulse_vault_write`, puis publie-le
-avec `path`. Un refus porte `issues` : corrige chaque chemin et republie. Un
+avec `path`. Un refus porte `issues` : corrige chaque chemin et republie.
+**Personnel ou d'organisation : c'est le canal où tu publies qui décide**
+(aucun champ à remplir). Publié dans le Tête-à-tête ou un fil direct,
+l'artefact dynamique est PERSONNEL : la personne seule le voit (rangé en
+« Personnels » dans Travail). Publié dans un canal d'organisation, il est
+partagé avec les membres de ce canal (rangé en « Organisation »). Publie là où
+la personne le demande — « pour moi » ⇒ Tête-à-tête, « pour l'équipe » ⇒ le
+canal d'organisation concerné — et dis-lui où tu l'as mis.
+`pulse_publish_artifact` publie dans la conversation EN COURS ; pour un autre
+canal, passe par l'outil MCP `channel_artifact_publish` (`channel`). Un
 refus `dashboards_disabled` veut dire que la fonction n'est pas ouverte pour
 cette organisation (elle est fermée par défaut) : dis-le à la personne — un
 administrateur de l'instance l'ouvre dans /admin — et ne cherche pas de

@@ -341,7 +341,9 @@ pousse ses propres points par l'outil MCP `channel_dashboard_push`. La
 fonction est fermée par défaut par organisation : un refus
 `dashboards_disabled` remonte tel quel (un admin d'instance l'ouvre dans
 /admin). À l'écran comme dans le skill `pulse-chat:guide`, on dit « artefact
-dynamique ». Requiert Pulse Chat ≥ 0.112.0.
+dynamique ». Requiert Pulse Chat ≥ 0.112.0. Personnel (Tête-à-tête, fil direct) ou
+d'organisation (canal d'org) selon le canal de publication, sans champ dédié
+(rangement « Personnels » / « Organisation » de Travail : Pulse Chat ≥ 0.113.0).
 
 ### Récupérer un fichier du coffre sur le disque (`pulse_vault_read`)
 
