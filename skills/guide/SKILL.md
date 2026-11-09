@@ -40,6 +40,7 @@ skill d'interface porte le catalogue et les exemples complets.
 | Écrire un fichier au coffre-fort (PDF, tableur, image, vidéo, texte…) | **outil du plugin** `pulse_vault_write` (`path` + `local_path`, ou `content` pour un texte). En secours, si cet outil n'est pas dans ta liste : **outils MCP** `channel_vault_write` (petit fichier) ou `channel_vault_upload_url` (gros fichier : tu fais le PUT toi-même) |
 | Montrer un fichier ou un document dans la conversation | **outil du plugin** `pulse_publish_artifact` — `kind: "file"` + `path` pour un fichier déjà écrit au coffre ; en secours, **outil MCP** `channel_artifact_publish`. Republier le même `artifact_id` crée une nouvelle version |
 | Montrer un film (animation générée) | **outil du plugin** `pulse_publish_artifact` — `kind: "motion"` + `path` pour une page HTML déjà écrite au coffre |
+| Montrer un ARTEFACT DYNAMIQUE (tableau de bord vivant : disponibilité de sites, latence, indicateurs d'une API publique, chiffres que tu calcules) | **outil du plugin** `pulse_publish_artifact` — `kind: "dashboard"` + `path` d'un `.json` écrit au coffre ; en secours, **outil MCP** `channel_artifact_publish`. Tes propres points : **outil MCP** `channel_dashboard_push` (`channel_dashboard_data` pour les relire) |
 | Faire un podcast, un résumé audio, quelque chose « à écouter » | **outil du plugin** `pulse_podcast` — titre + chapitres en prose parlée ; l'app synthétise et publie la carte elle-même (jamais `pulse_publish_artifact`) |
 | Solliciter un autre agent (depuis tout fil que tu sers : Tête-à-tête, canal, fil de tâche, conversation privée) | **outil du plugin** `pulse_open_subsession` — seulement les agents que tu as le droit d'appeler, consigne COMPLÈTE (seul contexte des autres agents) ; puis, DEPUIS la sous-session, `pulse_subsession_report` (seul chemin vers la conversation principale) |
 | Montrer une carte interactive (tableau, chiffres clés, graphique, comparatif, formulaire, simulateur) quand elle sert mieux que du texte | **outil du plugin** `pulse_ui` (skill `pulse-chat:interface`) ; en secours, **outil MCP** `channel_ui_render` (mêmes paramètres + `channel`) — la réponse de la personne te revient en message `[Interface : …]` |
@@ -77,6 +78,28 @@ fonction pure de `t`, qui expose `window.__duration` (secondes) et
 distante), <= 2 Mo. Même contrat que pour un fichier : écris-le d'abord avec
 `pulse_vault_write` (`local_path`), puis publie-le avec `path` — c'est ce qui
 se lit dans la carte.
+
+**Un ARTEFACT DYNAMIQUE (tableau de bord vivant), c'est `kind: "dashboard"`.**
+Quand tu en parles à la personne, dis « artefact dynamique » (pas « dashboard »
+ni « tableau de bord JSON ») : c'est le nom qu'elle voit à l'écran. C'est un
+fichier JSON
+`{"schema": "pulse-dashboard/1", "title", "range", "sources": [...], "panels": [...]}`
+que l'APP garde vivant : elle sonde elle-même les sources `http_check` (URL
+https publique, toutes les minutes au plus) et `http_json` (API JSON publique,
+5 min au plus, `fields` = `{nom: "chemin.dans[0].reponse"}`), et garde
+l'historique — tu n'as JAMAIS à republier pour rafraîchir. Pour un chiffre que
+tu calcules (script, requête, export), déclare une source `push` (`fields`) et
+envoie tes points avec l'outil MCP `channel_dashboard_push`
+(`channel_dashboard_data` pour relire ce qui est déjà enregistré). Panneaux :
+`stat`, `gauge`, `timeseries`, `bar`, `uptime`, `status`, `table`, `text`,
+`html` (sur mesure, sans réseau, données par `pulse.onData(fn)`). Même contrat
+que pour un fichier : écris le `.json` avec `pulse_vault_write`, puis publie-le
+avec `path`. Un refus porte `issues` : corrige chaque chemin et republie. Un
+refus `dashboards_disabled` veut dire que la fonction n'est pas ouverte pour
+cette organisation (elle est fermée par défaut) : dis-le à la personne — un
+administrateur de l'instance l'ouvre dans /admin — et ne cherche pas de
+contournement. Exemple, la disponibilité d'un site :
+`{"schema":"pulse-dashboard/1","title":"Sites","sources":[{"key":"site","kind":"http_check","label":"site.fr","url":"https://site.fr"}],"panels":[{"type":"status","sources":["site"],"w":12},{"type":"uptime","source":"site"},{"type":"timeseries","series":[{"source":"site","field":"latencyMs"}]}]}`.
 
 **Si ces deux outils ne sont pas dans ta liste** (image de plugin plus
 ancienne), le serveur MCP offre la même chose : `channel_vault_upload_url`

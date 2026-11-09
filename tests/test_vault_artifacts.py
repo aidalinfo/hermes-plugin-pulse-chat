@@ -269,6 +269,28 @@ class TestVaultUrl:
             vault.vault_url("http://app.test", "demo", "../secret")
 
 
+class TestDashboardKind:
+    # Artefact dynamique (docs/76 de l'app) : sans ``dashboard`` ici, l'agent
+    # se fait refuser son tableau de bord par SON PROPRE plugin (ValueError).
+    def test_le_type_dashboard_est_annonce_et_publiable(self):
+        assert "dashboard" in artifacts.ARTIFACT_KINDS
+        assert "dashboard" in artifacts.PUBLISHABLE_ARTIFACT_KINDS
+        enum = _load("workspace").PUBLISH_SCHEMA["parameters"]["properties"]["kind"]["enum"]
+        assert "dashboard" in enum
+
+    def test_payload_d_un_tableau_de_bord_par_chemin(self):
+        payload = artifacts.build_artifact_payload(
+            channel_slug="c",
+            artifact_id="sites",
+            kind="dashboard",
+            path="artifacts/sites.json",
+        )
+        assert payload["artifactKind"] == "dashboard"
+        assert payload["path"] == "artifacts/sites.json"
+
+    def test_chemin_par_defaut_en_json(self):
+        assert artifacts.default_artifact_path("dashboard", "Sites", "x").endswith(".json")
+
 class TestPodcastKind:
     # Jumeau de l'app, qui leve sur un type inconnu : sans ``podcast`` ici, une
     # carte de podcast rejouee a l'agent serait illisible pour son plugin. Mais

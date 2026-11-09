@@ -333,6 +333,16 @@ path="artifacts/devis.pdf", title="Devis — V4", artifact_id="devis-client")`.
 
 Aucune mise à jour de l'app n'est requise : les routes existent déjà.
 
+**Artefact dynamique (`kind: "dashboard"`, ≥ 1.26.0).** Un `.json`
+`pulse-dashboard/1` (sources `http_check`, `http_json`, `push` et panneaux)
+écrit au coffre puis publié avec `path`. L'app le valide, relève elle-même les
+sources et garde l'historique : l'agent ne republie pas pour rafraîchir, et
+pousse ses propres points par l'outil MCP `channel_dashboard_push`. La
+fonction est fermée par défaut par organisation : un refus
+`dashboards_disabled` remonte tel quel (un admin d'instance l'ouvre dans
+/admin). À l'écran comme dans le skill `pulse-chat:guide`, on dit « artefact
+dynamique ». Requiert Pulse Chat ≥ 0.112.0.
+
 ### Récupérer un fichier du coffre sur le disque (`pulse_vault_read`)
 
 Outil du plugin (≥ 1.21.0). Le chemin inverse de `pulse_vault_write` : le MCP

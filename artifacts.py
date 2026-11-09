@@ -41,7 +41,11 @@ from typing import Any, Dict, Optional
 #: ``pulse_podcast``, jamais par ``pulse_publish_artifact``. Il figure ici
 #: parce que la liste est le jumeau de l'app ; il est retire de ce qui se
 #: PUBLIE (``PUBLISHABLE_ARTIFACT_KINDS``).
-ARTIFACT_KINDS = ("mermaid", "markdown", "svg", "html", "drawio", "file", "motion", "podcast")
+#: ``dashboard`` est un TABLEAU DE BORD (docs/76) : un document JSON
+#: ``{"schema": "pulse-dashboard/1", "title", "sources": [...], "panels": [...]}``
+#: que l'APP valide, dont elle releve les sources (sondes de disponibilite,
+#: API JSON publiques, points pousses) et qu'elle rend nativement.
+ARTIFACT_KINDS = ("mermaid", "markdown", "svg", "html", "drawio", "file", "motion", "podcast", "dashboard")
 
 #: Types que l'AGENT peut publier (enum de ``pulse_publish_artifact``). Sans
 #: cette liste a part, le schema annoncerait ``podcast`` au modele, qui
@@ -142,6 +146,7 @@ ARTIFACT_EXTENSIONS = {
     "html": "html",
     "drawio": "drawio",
     "motion": "html",
+    "dashboard": "json",
 }
 
 
