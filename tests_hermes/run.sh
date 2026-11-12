@@ -1,7 +1,7 @@
 #!/bin/sh
 # Lance tests_hermes/ contre un VRAI Hermes, epingle par son commit.
 #
-#   tests_hermes/run.sh <commit Hermes> [arguments pytest, ex. -k e2e]
+#   tests_hermes/run.sh <commit Hermes> [arguments pytest, depuis tests_hermes/]
 #
 # Exige `uv` et un Python 3.14 (`PYTHON`, defaut python3.14) : Hermes ne
 # declare ses dependances que pour Python >= 3.14, et son uv.lock (installe
@@ -28,5 +28,7 @@ tar xzf "$work/hermes.tgz" -C "$work/src" --strip-components=1
 uv pip install -q --python "$work/src/.venv/bin/python" pytest
 
 echo "Hermes ${sha}"
+[ $# -gt 0 ] || set -- .
+cd "$here"
 HERMES_MATRIX_HOME="$work/home/.hermes" \
-  "$work/src/.venv/bin/python" -m pytest -q -p no:cacheprovider --rootdir "$here" "$@" "$here"
+  "$work/src/.venv/bin/python" -m pytest -q -p no:cacheprovider "$@"
