@@ -11,6 +11,7 @@ du plugin. Le modele, lui, est un script (cf. ``e2e_banc.FakeLLM``).
 import pathlib
 import shutil
 import tempfile
+import time
 import uuid
 
 import pytest
@@ -18,6 +19,7 @@ import pytest
 from e2e_banc import FakeApp, FakeLLM, Gateway, wait_until
 
 TURN_S = 90
+APPROVAL_TIMEOUT_S = 12
 
 
 @pytest.fixture(scope="module")
@@ -25,7 +27,7 @@ def banc():
     root = pathlib.Path(tempfile.mkdtemp(prefix="hermes-e2e-"))
     llm = FakeLLM()
     app = FakeApp()
-    gw = Gateway(root, llm, app)
+    gw = Gateway(root, llm, app, approval_timeout=APPROVAL_TIMEOUT_S)
     try:
         wait_until(lambda: app.frames("hello"), 120, "hello du plugin", gw)
         yield llm, app, gw
@@ -60,3 +62,194 @@ def test_aller_retour_texte(banc):
     message_id = app.say(slug, "E2E:texte bonjour")
     _final_text(app, slug, "PONG-E2E", gw)
     wait_until(lambda: any(f.get("messageId") == message_id for f in app.frames("ack")), 10, "ack", gw)
+
+
+def _final_after_tools(results):
+    return {"text": "FIN " + " | ".join(r[:300] for r in results)}
+
+
+def _cards(app, slug, kind):
+    return app.messages(slug, kind)
+
+
+def _cible(gw, name):
+    target = gw.workspace / name
+    target.mkdir()
+    (target / "f.txt").write_text("x")
+    return target
+
+
+def _rm_script(target, marker):
+    def script(results):
+        if not results:
+            return {"tool": "terminal", "args": {"command": f"rm -rf {target} && echo {marker}"}}
+        return _final_after_tools(results)
+    return script
+
+
+# --------------------------------------------------------------------------
+# Approbations : le vrai outil terminal declenche le vrai garde-fou
+# --------------------------------------------------------------------------
+
+
+def test_approbation_once_execute_la_commande(banc):
+    llm, app, gw = banc
+    slug = _slug()
+    target = _cible(gw, f"once-{slug}")
+    llm.scripts["once"] = _rm_script(target, "SUPPRIME-ONCE")
+    app.say(slug, "E2E:once")
+    card = wait_until(lambda: (_cards(app, slug, "approval_request") or [None])[0], TURN_S, "carte d'approbation", gw)
+    assert str(target) in card["command"]
+    assert card["requestId"].startswith("req-")
+    assert target.exists(), "commande executee AVANT la decision"
+    app.reply_approval(slug, card["requestId"], "once")
+    _final_text(app, slug, "SUPPRIME-ONCE", gw)
+    assert not target.exists()
+
+
+def test_approbation_deny_n_execute_rien(banc):
+    llm, app, gw = banc
+    slug = _slug()
+    target = _cible(gw, f"deny-{slug}")
+    llm.scripts["deny"] = _rm_script(target, "SUPPRIME-DENY")
+    app.say(slug, "E2E:deny")
+    card = wait_until(lambda: (_cards(app, slug, "approval_request") or [None])[0], TURN_S, "carte d'approbation", gw)
+    app.reply_approval(slug, card["requestId"], "deny")
+    final = _final_text(app, slug, "FIN", gw)
+    assert "SUPPRIME-DENY" not in str(final["content"])
+    assert target.exists()
+
+
+def test_approbation_sans_reponse_expire_en_refus(banc):
+    llm, app, gw = banc
+    slug = _slug()
+    target = _cible(gw, f"expire-{slug}")
+    llm.scripts["expire"] = _rm_script(target, "SUPPRIME-EXPIRE")
+    app.say(slug, "E2E:expire")
+    wait_until(lambda: _cards(app, slug, "approval_request"), TURN_S, "carte d'approbation", gw)
+    final = _final_text(app, slug, "FIN", gw)
+    assert "SUPPRIME-EXPIRE" not in str(final["content"])
+    assert target.exists()
+
+
+def test_approbation_rejouee_apres_coup_ne_fait_rien(banc):
+    llm, app, gw = banc
+    slug = _slug()
+    target = _cible(gw, f"rejeu-{slug}")
+    llm.scripts["rejeu"] = _rm_script(target, "SUPPRIME-REJEU")
+    app.say(slug, "E2E:rejeu")
+    card = wait_until(lambda: (_cards(app, slug, "approval_request") or [None])[0], TURN_S, "carte", gw)
+    app.reply_approval(slug, card["requestId"], "deny")
+    _final_text(app, slug, "FIN", gw)
+    # La meme decision, rejouee en « once » (reconnexion de l'app) : sans effet.
+    app.reply_approval(slug, card["requestId"], "once")
+    target2 = _cible(gw, f"rejeu2-{slug}")
+    llm.scripts["rejeu2"] = _rm_script(target2, "SUPPRIME-REJEU2")
+    app.say(slug, "E2E:rejeu2")
+    wait_until(lambda: len(_cards(app, slug, "approval_request")) >= 2, TURN_S, "seconde carte", gw)
+    app.reply_approval(slug, card["requestId"], "once")
+    time.sleep(2)
+    assert target2.exists(), "le rejeu d'une ancienne carte a approuve une nouvelle demande"
+    app.reply_approval(slug, _cards(app, slug, "approval_request")[1]["requestId"], "deny")
+    _final_text(app, slug, "FIN", gw)
+    assert target.exists() and target2.exists()
+
+
+def test_deux_demandes_chacune_sa_decision(banc):
+    """Deux commandes dangereuses dans le meme tour : la decision de chaque
+    carte ne s'applique qu'a SA commande, quel que soit l'ordre des reponses."""
+    llm, app, gw = banc
+    slug = _slug()
+    a = _cible(gw, f"a-{slug}")
+    b = _cible(gw, f"b-{slug}")
+
+    def script(results):
+        if not results:
+            return {"tools": [
+                {"tool": "terminal", "args": {"command": f"rm -rf {a} && echo SUPPRIME-A"}},
+                {"tool": "terminal", "args": {"command": f"rm -rf {b} && echo SUPPRIME-B"}},
+            ]}
+        return _final_after_tools(results)
+
+    llm.scripts["deux"] = script
+    app.say(slug, "E2E:deux")
+    answered = set()
+    deadline = time.monotonic() + TURN_S
+    while len(answered) < 2 and time.monotonic() < deadline:
+        cards = [c for c in _cards(app, slug, "approval_request") if c["requestId"] not in answered]
+        # Toujours la carte la plus RECENTE d'abord : en FIFO, sa decision
+        # tomberait sur l'autre demande.
+        for card in reversed(cards):
+            decision = "once" if str(a) in card["command"] else "deny"
+            app.reply_approval(slug, card["requestId"], decision)
+            answered.add(card["requestId"])
+        time.sleep(0.1)
+    assert len(answered) == 2, gw.tail()
+    _final_text(app, slug, "FIN", gw)
+    assert not a.exists(), "la commande approuvee n'a pas tourne"
+    assert b.exists(), "la commande refusee a tourne"
+
+
+# --------------------------------------------------------------------------
+# Question (clarify), sous-agent, coffre, voix
+# --------------------------------------------------------------------------
+
+
+def test_clarify_en_carte_et_reponse(banc):
+    llm, app, gw = banc
+    slug = _slug()
+
+    def script(results):
+        if not results:
+            return {"tool": "clarify", "args": {"questions": [
+                {"question": "Quelle couleur E2E ?", "choices": ["Rouge", "Bleu"]}]}}
+        return _final_after_tools(results)
+
+    llm.scripts["clarify"] = script
+    app.say(slug, "E2E:clarify")
+    card = wait_until(lambda: (_cards(app, slug, "question_request") or [None])[0], TURN_S, "carte question", gw)
+    assert "Quelle couleur E2E" in card["question"]
+    app.reply_question(slug, card["requestId"], "Bleu")
+    final = _final_text(app, slug, "FIN", gw)
+    assert "Bleu" in str(final["content"])
+
+
+def test_sous_agent_rend_son_resultat(banc):
+    llm, app, gw = banc
+    slug = _slug()
+    llm.scripts["enfant"] = lambda results: {"text": "RESULTAT-SOUS-AGENT"}
+
+    def parent(results):
+        if not results:
+            return {"tool": "delegate_task", "args": {"tasks": [{"goal": "E2E:enfant reponds simplement"}]}}
+        return _final_after_tools(results)
+
+    llm.scripts["parent"] = parent
+    app.say(slug, "E2E:parent")
+    final = _final_text(app, slug, "FIN", gw)
+    assert "RESULTAT-SOUS-AGENT" in str(final["content"])
+
+
+def test_coffre_ecriture_part_vers_l_app(banc):
+    llm, app, gw = banc
+    slug = _slug()
+
+    def script(results):
+        if not results:
+            return {"tool": "pulse_vault_write", "args": {"path": "rapports/e2e.md", "content": "# E2E\n"}}
+        return _final_after_tools(results)
+
+    llm.scripts["coffre"] = script
+    app.say(slug, "E2E:coffre")
+    _final_text(app, slug, "FIN", gw)
+    writes = [p for p in app.posts if p["path"].startswith(f"/api/agent/vault/{slug}/")]
+    assert writes and writes[0]["method"] == "PUT", app.posts[-5:]
+    assert writes[0]["path"].endswith("rapports/e2e.md")
+
+
+def test_message_vocal_sans_media_reste_un_tour_normal(banc):
+    llm, app, gw = banc
+    llm.scripts["vocal"] = lambda results: {"text": "PONG-VOCAL"}
+    slug = _slug()
+    app.say(slug, "E2E:vocal", messageType="voice")
+    _final_text(app, slug, "PONG-VOCAL", gw)
