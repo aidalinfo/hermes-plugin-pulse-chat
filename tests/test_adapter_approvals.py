@@ -60,11 +60,23 @@ def _capture_resolutions(monkeypatch):
     """
     resolutions = []
 
-    def fake_resolve(session_key, choice, resolve_all=False, reason=None):
-        resolutions.append((session_key, choice))
+    # Signature de Hermes 0.22 et 0.23 : ``request_id`` existe, et n'est
+    # enregistre que lorsqu'il est passe (l'ancien appel FIFO reste lisible).
+    def fake_resolve(session_key, choice, resolve_all=False, reason=None, request_id=None):
+        if request_id is not None:
+            resolutions.append((session_key, choice, request_id))
+        else:
+            resolutions.append((session_key, choice))
         return 1
 
     monkeypatch.setattr(adapter_module, "resolve_gateway_approval", fake_resolve)
+    # API facultatives absentes par defaut : chaque test les arme lui-meme.
+    for name in (
+        "resolve_gateway_approval_card",
+        "restrict_gateway_approval_card_to_deny",
+        "list_gateway_approvals",
+    ):
+        monkeypatch.setattr(adapter_module, name, None)
     return resolutions
 
 
@@ -446,3 +458,218 @@ def test_reemission_du_meme_request_id_est_debloquee_par_la_reponse():
         assert adapter._pending_approvals == {}
 
     asyncio.run(run())
+
+
+class TestLiaisonExacte:
+    """Issue #59 : Hermes 0.23.1 appelle ``send_exec_approval(..., request_id=)``.
+
+    Sans ce parametre, la carte levait ``TypeError`` et Hermes reprenait son
+    invite texte, a laquelle Pulse Chat ne sait pas repondre. L'identifiant
+    d'Hermes doit en plus trancher SA demande, et seulement elle.
+    """
+
+    def test_la_liaison_est_declaree_sur_la_CLASSE_elle_meme(self):
+        # PR amont hermes-agent#136199 : ``type(adapter).__dict__`` est lu.
+        cls = adapter_module.PulseChatAdapter
+        assert cls.__dict__.get("supports_exec_approval_request_binding") is True
+
+    def test_l_appel_de_Hermes_0_23_se_lie_a_la_signature(self):
+        # Forme exacte de ``gateway/run_turn_runner.py:753-756`` (v0.23.1) :
+        # c'est la liaison des arguments qui levait ``TypeError`` (issue #59).
+        import inspect
+
+        sig = inspect.signature(adapter_module.PulseChatAdapter.send_exec_approval)
+        flags = {"allow_permanent": True, "allow_session": True, "smart_denied": False}
+        sig.bind(
+            object(), chat_id="demo", command="ls", session_key="s", description="d",
+            metadata=None, request_id="h-1", **flags,
+        )
+        # Forme de Hermes 0.22.5 : sans ``request_id``.
+        sig.bind(
+            object(), chat_id="demo", command="ls", session_key="s", description="d",
+            metadata=None, **flags,
+        )
+
+    def test_la_decision_rend_l_identifiant_d_Hermes(self, monkeypatch):
+        async def run():
+            resolutions = _capture_resolutions(monkeypatch)
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(
+                chat_id="demo", command="ls", session_key="sess-7", request_id="hreq-123"
+            )
+            # L'app recoit SON identifiant, jamais celui d'Hermes.
+            assert posted[0]["requestId"].startswith("req-")
+            assert "hreq-123" not in str(posted[0])
+
+            adapter._handle_approval_reply(_reply_frame(posted[0]["requestId"], "once"))
+
+            assert resolutions == [("sess-7", "once", "hreq-123")]
+            assert adapter._gateway_approvals == {}
+
+        asyncio.run(run())
+
+    def test_deux_demandes_concurrentes_restent_distinctes(self, monkeypatch):
+        # Trancher la seconde ne doit pas trancher la premiere (FIFO).
+        async def run():
+            resolutions = _capture_resolutions(monkeypatch)
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(chat_id="demo", command="a", session_key="s", request_id="h-1")
+            await adapter.send_exec_approval(chat_id="demo", command="b", session_key="s", request_id="h-2")
+            adapter._handle_approval_reply(_reply_frame(posted[1]["requestId"], "deny"))
+            adapter._handle_approval_reply(_reply_frame(posted[0]["requestId"], "once"))
+            assert resolutions == [("s", "deny", "h-2"), ("s", "once", "h-1")]
+
+        asyncio.run(run())
+
+    def test_une_decision_rejouee_n_est_appliquee_qu_une_fois(self, monkeypatch):
+        async def run():
+            resolutions = _capture_resolutions(monkeypatch)
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(chat_id="demo", command="ls", session_key="s", request_id="h")
+            frame = _reply_frame(posted[0]["requestId"], "once")
+            adapter._handle_approval_reply(frame)
+            adapter._handle_approval_reply(frame)
+            assert resolutions == [("s", "once", "h")]
+
+        asyncio.run(run())
+
+    def test_un_argument_inconnu_ne_casse_pas_la_carte(self, monkeypatch):
+        # Un ``TypeError`` ici ferait reprendre l'invite texte par Hermes.
+        async def run():
+            _capture_resolutions(monkeypatch)
+            adapter, posted = _make_adapter()
+            result = await adapter.send_exec_approval(
+                chat_id="demo", command="ls", session_key="s", request_id="h", futur=True
+            )
+            assert result.success is True
+            assert len(posted) == 1
+
+        asyncio.run(run())
+
+    def test_un_resolveur_sans_request_id_garde_l_ancien_appel(self, monkeypatch):
+        # Hermes plus ancien : lui passer ``request_id`` leverait ``TypeError``.
+        async def run():
+            _capture_resolutions(monkeypatch)
+            calls = []
+
+            def old_resolve(session_key, choice, resolve_all=False, reason=None):
+                calls.append((session_key, choice))
+                return 1
+
+            monkeypatch.setattr(adapter_module, "resolve_gateway_approval", old_resolve)
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(chat_id="demo", command="ls", session_key="s", request_id="h")
+            adapter._handle_approval_reply(_reply_frame(posted[0]["requestId"], "once"))
+            assert calls == [("s", "once")]
+
+        asyncio.run(run())
+
+
+class TestHermes023CarteNative:
+    """API de carte de Hermes 0.23 : ``resolve_gateway_approval_card`` et le
+    verrou « refus seulement » pose a la creation de chaque demande (#62359)."""
+
+    def _arm(self, monkeypatch, deny_only=None):
+        calls = {"card": [], "restrict": []}
+        locked = {} if deny_only is None else deny_only
+
+        def card(session_key, choice, request_id, **kwargs):
+            calls["card"].append((session_key, choice, request_id))
+            if choice != "deny" and locked.get(request_id, True):
+                return 0
+            return 1
+
+        def restrict(session_key, request_id, restricted=True):
+            calls["restrict"].append((request_id, restricted))
+            locked[request_id] = restricted
+
+        monkeypatch.setattr(adapter_module, "resolve_gateway_approval_card", card)
+        monkeypatch.setattr(adapter_module, "restrict_gateway_approval_card_to_deny", restrict)
+        return calls, locked
+
+    def test_la_carte_leve_le_verrou_et_tranche_sa_demande(self, monkeypatch):
+        async def run():
+            resolutions = _capture_resolutions(monkeypatch)
+            calls, locked = self._arm(monkeypatch)
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(chat_id="demo", command="ls", session_key="s", request_id="h")
+            assert locked == {"h": False}
+            adapter._handle_approval_reply(_reply_frame(posted[0]["requestId"], "once"))
+            assert calls["card"] == [("s", "once", "h")]
+            # Jamais l'ancien resolveur quand l'API de carte existe.
+            assert resolutions == []
+
+        asyncio.run(run())
+
+    def test_un_envoi_en_echec_remet_le_verrou(self, monkeypatch):
+        async def run():
+            _capture_resolutions(monkeypatch)
+            calls, locked = self._arm(monkeypatch)
+            adapter, _ = _make_adapter(post_ok=False)
+            result = await adapter.send_exec_approval(
+                chat_id="demo", command="ls", session_key="s", request_id="h"
+            )
+            assert result.success is False
+            assert calls["restrict"] == [("h", False), ("h", True)]
+            assert locked == {"h": True}
+            assert adapter._gateway_approvals == {}
+
+        asyncio.run(run())
+
+    def test_une_demande_expiree_n_est_pas_tranchee(self, monkeypatch):
+        async def run():
+            _capture_resolutions(monkeypatch)
+            monkeypatch.setattr(adapter_module, "resolve_gateway_approval_card", lambda *a, **k: 0)
+            monkeypatch.setattr(adapter_module, "restrict_gateway_approval_card_to_deny", lambda *a, **k: None)
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(chat_id="demo", command="ls", session_key="s", request_id="h")
+            # Rend 0 : rien n'est tranche, aucune exception, l'entree est consommee.
+            adapter._handle_approval_reply(_reply_frame(posted[0]["requestId"], "once"))
+            assert adapter._gateway_approvals == {}
+
+        asyncio.run(run())
+
+
+class TestHermes022SansIdentifiant:
+    """Hermes 0.22.5 : la carte est appelee sans ``request_id``, mais chaque
+    demande en a un dans la file (``list_gateway_approvals``)."""
+
+    def test_la_seule_demande_sans_carte_est_liee(self, monkeypatch):
+        async def run():
+            resolutions = _capture_resolutions(monkeypatch)
+            queue = [{"request_id": "h-1", "command": "a"}]
+            monkeypatch.setattr(adapter_module, "list_gateway_approvals", lambda sk: list(queue))
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(chat_id="demo", command="a", session_key="s")
+            queue.append({"request_id": "h-2", "command": "b"})
+            await adapter.send_exec_approval(chat_id="demo", command="b", session_key="s")
+            adapter._handle_approval_reply(_reply_frame(posted[1]["requestId"], "deny"))
+            adapter._handle_approval_reply(_reply_frame(posted[0]["requestId"], "once"))
+            assert resolutions == [("s", "deny", "h-2"), ("s", "once", "h-1")]
+
+        asyncio.run(run())
+
+    def test_une_ambiguite_n_est_jamais_tranchee_a_l_aveugle(self, monkeypatch):
+        # Deux demandes deja en file avant la premiere carte : impossible de
+        # savoir laquelle est la sienne. L'ancien appel FIFO pourrait trancher
+        # celle de l'autre carte — on refuse, l'attente expirera en refus.
+        async def run():
+            resolutions = _capture_resolutions(monkeypatch)
+            queue = [{"request_id": "h-1"}, {"request_id": "h-2"}]
+            monkeypatch.setattr(adapter_module, "list_gateway_approvals", lambda sk: list(queue))
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(chat_id="demo", command="a", session_key="s")
+            adapter._handle_approval_reply(_reply_frame(posted[0]["requestId"], "once"))
+            assert resolutions == []
+
+        asyncio.run(run())
+
+    def test_sans_file_lisible_l_ancien_appel_est_garde(self, monkeypatch):
+        async def run():
+            resolutions = _capture_resolutions(monkeypatch)
+            adapter, posted = _make_adapter()
+            await adapter.send_exec_approval(chat_id="demo", command="a", session_key="s")
+            adapter._handle_approval_reply(_reply_frame(posted[0]["requestId"], "once"))
+            assert resolutions == [("s", "once")]
+
+        asyncio.run(run())

@@ -1,0 +1,62 @@
+# Compatibilite du plugin avec de VRAIS Hermes, epingles par commit (issue #59).
+#
+# - unitaires : `pytest tests`, sans Hermes (stubs) ;
+# - matrice : `tests_hermes/run.sh <commit>` installe Hermes depuis son uv.lock
+#   (Python 3.14, seule cible de ses dependances) et lance tests_hermes/ :
+#   vrais modules d'Hermes, puis un Hermes EPHEMERE complet (`hermes gateway
+#   run`, fausse app Pulse Chat, faux modele scenarise). HOME et HERMES_HOME
+#   temporaires, aucun secret, rien hors 127.0.0.1 une fois Hermes installe.
+#
+# Ajouter une version : son tag ET le commit qu'il designe
+# (`git ls-remote --tags https://github.com/NousResearch/hermes-agent 'refs/tags/vX.Y.Z^{}'`).
+# Ne jamais mettre une branche ni un tag nu : la matrice doit rester rejouable.
+name: Compatibilite Hermes
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unitaires:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -q pytest websockets
+      - run: python -m pytest -q -p no:cacheprovider tests
+
+  hermes:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Plus ancien tag stable 0.21 publie (v0.21.5 et v0.21.1 n'existent
+          # qu'en abandoned-rc.* : non retenus).
+          - version: v0.21.6
+            commit: 818c13be1dc4fd28987e1e881a9408224afd4535
+          # Reference « ancienne » de l'issue #59 : la carte est appelee sans request_id.
+          - version: v0.22.5
+            commit: bf0203a794a07aac3ff764972ab9087baa4e4f4e
+          - version: v0.22.7
+            commit: b200f5bc60e31588ba2cb60e288029c4a54ba5fa
+          # Stable au 12/11/2026 : request_id passe a send_exec_approval.
+          - version: v0.23.1
+            commit: 3b421578588243f920886e6fe79a6faa87ea026e
+    name: Hermes ${{ matrix.version }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v6
+      - run: sh tests_hermes/run.sh "${{ matrix.commit }}"
+        env:
+          PYTHON: python3.14

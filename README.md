@@ -21,14 +21,18 @@ hermes-plugin/pulse-chat/
 ├── pilot_heartbeat.py  # battement de vie des cartes de pilotage (pur)
 ├── netguard.py         # garde-fous réseau : schémas, redirections, clair, journaux
 ├── skills/             # skills enregistrés (guide, interface, …)
-└── tests/              # pytest (sans hermes installé)
+├── tests/              # pytest (sans hermes installé)
+└── tests_hermes/       # vrais Hermes épinglés et Hermes éphémère de bout en bout (matrice CI)
 ```
 
 
 ## Installation rapide (repo publié)
 
-Ce plugin est publié sur **github.com/aidalinfo/hermes-plugin-pulse-chat**
-(miroir automatique du monorepo `PROJET-pulse-chat`, dossier `hermes-plugin/pulse-chat/`).
+Ce plugin est publié sur **github.com/aidalinfo/hermes-plugin-pulse-chat**,
+et **ce dépôt fait foi** : c'est lui que `hermes plugins install` clone. La
+copie du monorepo `PROJET-pulse-chat` (`hermes-plugin/pulse-chat/`) n'est pas
+synchronisée (elle était restée en 1.16.0 au 12/11/2026) : ne pas la
+modifier ni la prendre pour référence.
 
 Voir aussi [`skills/guide/SKILL.md`](./skills/guide/SKILL.md) (enregistré en `pulse-chat:guide`, nommé dans `platform_hint`) : ce que **l'agent** doit savoir pour se
 servir de Pulse Chat une fois branché : les outils MCP de `/mcp-hermes`
@@ -629,6 +633,87 @@ pulse_ui(op, surface_id, document?, patch?, text?)
 - **App trop ancienne** (< 0.93.0) : 400 sur `kind: "ui_surface"`, relayé au
   modèle, qui répond en texte. Repli sans plugin à jour : l'outil MCP
   `channel_ui_render` (`/mcp-hermes`, mêmes paramètres + `channel`).
+
+### Compatibilité Hermes (≥ 1.26.3)
+
+Versions **testées** à chaque PR vers `main` (`.github/workflows/hermes-compat.yml`),
+avec le vrai Hermes installé depuis son `uv.lock`, épinglé par commit :
+
+| Hermes | Commit | Appel de la carte d'approbation |
+|---|---|---|
+| v0.21.6 | `818c13be` | sans `request_id` |
+| v0.22.5 | `bf0203a7` | sans `request_id` |
+| v0.22.7 | `b200f5bc` | sans `request_id` |
+| v0.23.1 | `3b421578` | `request_id=` (cause de l'issue #59) |
+
+**Minimum supporté : v0.21.6**, le plus ancien testé. Les tags `v0.21.5` et
+`v0.21.1` n'existent pas chez Hermes (seulement des `abandoned-rc.*`) : un
+bot qui affiche ces numéros tourne sur une image intermédiaire, à identifier
+par son commit avant de conclure. En dessous de v0.21.6 rien n'est garanti.
+
+`tests_hermes/` tourne sur chacune, en deux niveaux :
+
+- `test_hermes_reel.py`, sur les vrais modules d'Hermes : chargement par le
+  vrai chargeur de plugins et enregistrement de la plateforme `pulse_chat` ;
+  signatures des méthodes surchargées (aucune ne doit refuser un argument que
+  la base de cet Hermes déclare) ; approbations sur la vraie file du
+  garde-fou, avec l'ancienne **et** la nouvelle forme d'appel.
+- `test_e2e_gateway.py`, sur un **Hermes éphémère** : `hermes gateway run`
+  réel, plugin chargé par Hermes lui-même, avec une fausse app Pulse Chat
+  (WebSocket `/ws/hermes` et routes `/api/*`) et un faux modèle compatible
+  OpenAI qui joue un script (`e2e_banc.py`). HOME et HERMES_HOME jetables,
+  rien ne sort de `127.0.0.1`. Scénarios : aller-retour texte et ack ;
+  approbations once, deny, expiration, décision rejouée, deux commandes
+  dangereuses dans le même tour (le vrai outil `terminal` exécute ou non
+  la commande) ; question `clarify` en carte ; sous-agent (`delegate_task`,
+  synchrone ou en arrière-plan selon la version) ; écriture au coffre
+  (`pulse_vault_write`, `PUT /api/agent/vault/…`) ; voix (`text_to_speech`
+  sur une synthèse factice, `POST /api/agent/voice/<canal>`) ; navigateur
+  (`browser_exec` avec `browser.cloud_provider: pulse`, session demandée à
+  l'app pour le canal de la conversation).
+
+Lancer une version à la main : `PYTHON=python3.14 sh tests_hermes/run.sh
+<commit> [arguments pytest]` (exige `uv`). Limites assumées : le modèle est un
+script, l'app une imitation de son contrat (pas l'app Nuxt), le navigateur
+s'arrête à la demande de session (l'app répond 501, aucun Chromium distant),
+la transcription d'une note vocale entrante n'est pas jouée (il faudrait un
+fournisseur STT).
+
+Deux points relevés sur le vrai Hermes, utiles pour lire un journal de bot :
+depuis 0.23, les outils du plugin (`pulse_vault_write`, etc.) ne sont plus dans
+la liste directe du modèle, il les atteint par `tool_search` / `tool_call` ;
+et l'outil navigateur s'appelle `browser_exec` (aucune version testée n'a de
+`browser_navigate`).
+
+**Approbations, ce que fait le plugin selon l'Hermes chargé.** Il détecte les
+API réellement présentes (imports gardés, signature lue par `inspect`), jamais
+le numéro de version :
+
+1. Hermes passe `request_id` (0.23) : il est gardé à part de l'identifiant
+   `req-…` de la carte Pulse (l'app ne voit jamais celui d'Hermes) et la
+   décision est rendue à `resolve_gateway_approval_card`, qui ne tranche que
+   **cette** demande. Hermes 0.23 crée chaque demande en « refus seulement »
+   jusqu'à ce qu'une carte montre la commande entière : la carte Pulse la
+   montre toujours (jamais coupée), le plugin lève donc ce verrou avant de la
+   poster et le remet si l'envoi échoue.
+2. Hermes ne passe pas `request_id` (≤ 0.22) : le plugin cherche la demande
+   dans la file (`list_gateway_approvals`) et la lie si elle est la **seule**
+   sans carte, puis résout par `resolve_gateway_approval(..., request_id=)`.
+3. Sans identifiant, l'ancien appel par ordre d'arrivée n'est utilisé que si
+   la session n'a qu'**une** demande en attente. Sinon la décision n'est pas
+   appliquée (journal « decision … non appliquee ») : l'attente expire et
+   Hermes refuse. Mieux qu'exécuter une commande que personne n'a approuvée.
+
+Une décision rejouée, dupliquée ou arrivée après l'expiration ne tranche rien.
+`supports_exec_approval_request_binding = True` est déclaré pour la PR amont
+hermes-agent#136199 (encore ouverte) ; un Hermes qui ne la connaît pas l'ignore.
+
+**Retour arrière.** Réinstaller la 1.26.2 (`git -C ~/.hermes/plugins/pulse-chat
+checkout d4141cc`, puis `hermes gateway restart`) ne convient qu'à un Hermes ≤
+0.22.7 : sur 0.23.x, la 1.26.2 fait retomber chaque approbation en invite texte,
+à laquelle Pulse Chat ne sait pas répondre. Sur 0.23.x, revenir plutôt à
+l'image Hermes précédente. Le déploiement des bots (canari puis flotte) se
+décide à part, après validation de cette version.
 
 ### Hermes 0.21.6 et la fiche de capacités
 
