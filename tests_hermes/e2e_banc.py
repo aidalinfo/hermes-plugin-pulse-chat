@@ -111,7 +111,8 @@ class FakeLLM:
                     self._json(404, {"error": f"route inconnue {self.path}"})
                     return
                 banc.requests.append(body)
-                reply = banc.decide(body.get("messages") or [])
+                offered = {t.get("function", {}).get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
+                reply = banc.decide(body.get("messages") or [], offered)
                 if body.get("stream"):
                     self._stream(body, reply)
                 else:
@@ -150,7 +151,7 @@ class FakeLLM:
         self.server = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
-    def decide(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def decide(self, messages: List[Dict[str, Any]], offered: Optional[set] = None) -> Dict[str, Any]:
         last_user = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=None)
         if last_user is None:
             return {"text": "ok"}
@@ -165,8 +166,18 @@ class FakeLLM:
         reply = dict(script(results))
         if "tool" in reply:
             reply = {"tools": [{"tool": reply["tool"], "args": reply["args"]}]}
+        calls = []
         for call in reply.get("tools") or []:
+            # Outil differe (Hermes >= 0.23 : outils de plugin et MCP derriere
+            # ``tool_search``) : on passe par le pont ``tool_call``, comme le
+            # ferait un modele qui ne le voit pas dans sa liste.
+            if offered and call["tool"] not in offered and "tool_call" in offered:
+                call = {"tool": "tool_call",
+                        "args": {"calls": [{"name": call["tool"], "arguments": call["args"]}]}}
             call.setdefault("call_id", f"call_{uuid.uuid4().hex[:10]}")
+            calls.append(call)
+        if calls:
+            reply["tools"] = calls
         return reply
 
     @staticmethod
@@ -329,9 +340,7 @@ class Gateway:
             "  api_key: e2e-sans-valeur\n"
             "  context_length: 200000\n"
             "plugins:\n  enabled:\n    - pulse-chat\n"
-            # Le toolset du plugin (coffre, publication…) est opt-in chez Hermes :
-            # une plateforme de plugin n'a par defaut que ``hermes-<plateforme>``.
-            "platform_toolsets:\n  pulse_chat: [hermes-pulse_chat, pulse_chat]\n"
+
             f"approvals:\n  mode: manual\n  timeout: {approval_timeout}\n"
             "terminal:\n  backend: local\n"
             f"  cwd: {self.workspace}\n",
