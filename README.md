@@ -70,6 +70,17 @@ Puis configurer les variables d'env (voir plus bas) et `hermes gateway restart`.
   l'admission native d'Hermes refuse tout `metadata` hors WhatsApp. Ces
   réglages sont appliqués par le plugin lui-même depuis la 1.23.0 (voir
   « Réglages de l'agent »).
+- **Reconnexion** (`reconnect.py`) : une coupure du WebSocket relance une
+  boucle de reconnexion propre au plugin, indéfinie, avec un délai qui
+  double à chaque échec : 2 s, 4 s, 8 s, 16 s, 32 s, puis une tentative par
+  minute. Un handshake refusé en **401/403** ne l'arrête plus (1.26.2) : ce
+  refus peut venir d'un intermédiaire (bouncer CrowdSec qui bannit l'IP de
+  sortie des bots) et pas d'un jeton invalide. Il est retenté plus lentement
+  (30 s, 1, 2, 4, 8, puis 10 min au plus), avec un log `ERROR` à chaque
+  refus : le bot revient au plus ~10 min après la levée d'un ban. Chaque
+  délai est tiré entre sa moitié et sa valeur (gigue), pour que les bots
+  d'une même IP ne se reconnectent pas à la même seconde. Au **démarrage**,
+  un 401/403 reste fatal : une erreur de configuration se voit tout de suite.
 - **plugin → app** : `POST <PULSE_CHAT_URL>/api/agent/messages`
   (header `Authorization: Bearer <PULSE_CHAT_TOKEN>`), body JSON
   `{channelSlug, kind, content, raw, hermesMessageId, tool, phase, replyToHermesId}`

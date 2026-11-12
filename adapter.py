@@ -223,7 +223,13 @@ from .todos import (
     raw_of,
     todo_message_id,
 )
-from .reconnect import is_retryable_ws_error, reconnect_delay
+from .reconnect import (
+    auth_retry_delay,
+    is_auth_rejection,
+    is_retryable_ws_error,
+    jittered,
+    reconnect_delay,
+)
 from . import pilot_heartbeat
 from .netguard import (
     ALLOW_INSECURE_ENV,
@@ -612,6 +618,9 @@ class PulseChatAdapter(BasePlatformAdapter):
         # reconnect.py) : tache de boucle + retryabilite du dernier echec.
         self._reconnect_task: Optional[asyncio.Task] = None
         self._last_connect_retryable: bool = True
+        # Dernier echec de connect() = handshake refuse en 401/403 (jeton
+        # invalide ou intermediaire type CrowdSec) : retente lentement.
+        self._last_connect_auth_rejected: bool = False
         self._media_dir: Optional[str] = None
         # Cache borne (FIFO) des derniers message ids traites — dedup du rejeu.
         self._seen_message_ids: "OrderedDict[str, None]" = OrderedDict()
@@ -774,6 +783,7 @@ class PulseChatAdapter(BasePlatformAdapter):
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Ouvre le WebSocket vers l'app et demarre la boucle de reception."""
         self._loop = asyncio.get_running_loop()
+        self._last_connect_auth_rejected = False
         if not self.base_url or not self.token:
             self._last_connect_retryable = False
             self._set_fatal_error(
@@ -826,6 +836,7 @@ class PulseChatAdapter(BasePlatformAdapter):
             retryable = is_retryable_ws_error(exc)
             logger.error("Pulse Chat: echec de connexion WS a %s — %s", redact_url(self.base_url), exc)
             self._last_connect_retryable = retryable
+            self._last_connect_auth_rejected = is_auth_rejection(exc)
             self._set_fatal_error("connect_failed", str(exc), retryable=retryable)
             return False
 
@@ -1135,13 +1146,21 @@ class PulseChatAdapter(BasePlatformAdapter):
     async def _reconnect_loop(self) -> None:
         """Retente ``connect(is_reconnect=True)`` avec backoff, indefiniment.
 
-        S'arrete : au succes, ou sur un echec non-retryable (token invalide,
-        config) — seul cas ou le fatal est notifie au gateway.
+        S'arrete : au succes, ou sur un echec non-retryable (config, transport,
+        dependance) — seul cas ou le fatal est notifie au gateway. Un handshake
+        refuse en 401/403 n'arrete PAS la boucle (incident 2026-11-11 : 403 du
+        bouncer CrowdSec, agents hors ligne jusqu'au restart) : il est retente
+        avec un backoff plus lent (``auth_retry_delay``) et journalise a chaque
+        fois. Tous les delais portent une gigue (``jittered``).
         """
         attempt = 0
+        auth_rejections = 0
         while True:
             attempt += 1
-            delay = reconnect_delay(attempt)
+            if auth_rejections:
+                delay = jittered(auth_retry_delay(auth_rejections))
+            else:
+                delay = jittered(reconnect_delay(attempt))
             if delay:
                 await asyncio.sleep(delay)
             logger.warning(
@@ -1160,6 +1179,15 @@ class PulseChatAdapter(BasePlatformAdapter):
                 # un echec retryable et on continue le backoff.
                 logger.exception("Pulse Chat: erreur inattendue pendant la reconnexion")
                 continue
+            if self._last_connect_auth_rejected:
+                auth_rejections += 1
+                logger.error(
+                    "Pulse Chat: handshake refuse (401/403) — jeton invalide ou IP "
+                    "bloquee par un intermediaire ; nouvel essai dans ~%.0fs",
+                    auth_retry_delay(auth_rejections),
+                )
+                continue
+            auth_rejections = 0
             if not self._last_connect_retryable:
                 logger.error(
                     "Pulse Chat: echec de reconnexion non-retryable — abandon"
