@@ -69,7 +69,8 @@ def _text(message: Dict[str, Any]) -> str:
 class FakeLLM:
     """Scripts : ``scenario -> fonction(tool_results) -> reponse``.
 
-    Une reponse est ``{"text": ...}`` ou ``{"tool": nom, "args": {...}}``.
+    Une reponse est ``{"text": ...}``, ``{"tool": nom, "args": {...}}`` ou
+    ``{"tools": [{"tool": ..., "args": ...}, ...]}`` (appels paralleles).
     ``tool_results`` : contenus des messages ``tool`` venus APRES le dernier
     message humain, dans l'ordre.
     """
@@ -131,9 +132,10 @@ class FakeLLM:
                     self.wfile.flush()
 
                 chunk({"role": "assistant", "content": ""})
-                if "tool" in reply:
-                    chunk({"tool_calls": [{"index": 0, "id": reply["call_id"], "type": "function",
-                                           "function": {"name": reply["tool"], "arguments": json.dumps(reply["args"])}}]})
+                if reply.get("tools"):
+                    for index, call in enumerate(reply["tools"]):
+                        chunk({"tool_calls": [{"index": index, "id": call["call_id"], "type": "function",
+                                               "function": {"name": call["tool"], "arguments": json.dumps(call["args"])}}]})
                     chunk({}, "tool_calls")
                 else:
                     chunk({"content": reply["text"]})
@@ -156,17 +158,20 @@ class FakeLLM:
         results = [_text(m) for m in messages[last_user + 1:] if m.get("role") == "tool"]
         reply = dict(self.scripts[scenario](results))
         if "tool" in reply:
-            reply.setdefault("call_id", f"call_{uuid.uuid4().hex[:10]}")
+            reply = {"tools": [{"tool": reply["tool"], "args": reply["args"]}]}
+        for call in reply.get("tools") or []:
+            call.setdefault("call_id", f"call_{uuid.uuid4().hex[:10]}")
         return reply
 
     @staticmethod
     def completion(body, reply):
         message: Dict[str, Any] = {"role": "assistant", "content": reply.get("text")}
         finish = "stop"
-        if "tool" in reply:
+        if reply.get("tools"):
             message["content"] = None
-            message["tool_calls"] = [{"id": reply["call_id"], "type": "function",
-                                      "function": {"name": reply["tool"], "arguments": json.dumps(reply["args"])}}]
+            message["tool_calls"] = [{"id": call["call_id"], "type": "function",
+                                      "function": {"name": call["tool"], "arguments": json.dumps(call["args"])}}
+                                     for call in reply["tools"]]
             finish = "tool_calls"
         return {"id": f"chatcmpl-{uuid.uuid4().hex[:12]}", "object": "chat.completion", "created": int(time.time()),
                 "model": body.get("model") or "e2e-model",
