@@ -2391,6 +2391,16 @@ class PulseChatAdapter(BasePlatformAdapter):
         """
         return True
 
+    #: Liaison EXACTE de la carte a la demande d'Hermes (PR amont
+    #: hermes-agent#136199, toujours ouverte au 12/11/2026 ; Pulse Chat #412).
+    #: Avec elle, le runner ne rend une carte que si la CLASSE de l'adaptateur
+    #: declare cet attribut (lu par ``type(adapter).__dict__``, donc ici et pas
+    #: dans une classe parente) ; sinon il poste son invite texte, a laquelle
+    #: Pulse Chat ne peut pas repondre. Un Hermes qui ne connait pas
+    #: l'attribut l'ignore. L'adaptateur tient deja ce que l'attribut promet :
+    #: il garde ``request_id`` et le rend a la resolution.
+    supports_exec_approval_request_binding = True
+
     async def send_exec_approval(
         self,
         chat_id: str,
@@ -2401,6 +2411,8 @@ class PulseChatAdapter(BasePlatformAdapter):
         allow_permanent: bool = True,
         allow_session: bool = True,
         smart_denied: bool = False,
+        request_id: Optional[str] = None,
+        **_ignored: Any,
     ) -> SendResult:
         """Rend le garde-fou d'Hermes sous forme de CARTE, pas d'invite texte.
 
@@ -2421,6 +2433,15 @@ class PulseChatAdapter(BasePlatformAdapter):
         exception : Hermes reprend alors SON invite texte. C'est la seule
         degradation acceptable — se taire laisserait l'humain devant un agent
         muet jusqu'a l'expiration du garde-fou.
+
+        ``request_id`` est l'identifiant de la demande CHEZ HERMES, passe depuis
+        Hermes 0.23 (``gateway/run_turn_runner.py``) ; sans ce parametre, la
+        carte levait ``TypeError`` et Hermes reprenait son invite texte. Il est
+        garde pour la resolution, jamais montre a l'app, qui recoit le sien.
+        Un Hermes plus ancien ne le passe pas : on cherche alors la demande dans
+        sa file (``_bind_hermes_request``), et a defaut on garde l'ancien appel.
+        ``**_ignored`` : un argument nomme qu'un Hermes plus recent ajouterait
+        ne doit pas faire retomber la carte en invite texte.
         """
         if resolve_gateway_approval is None:
             # Poster la carte sans pouvoir debloquer le thread agent serait pire
@@ -2432,6 +2453,8 @@ class PulseChatAdapter(BasePlatformAdapter):
             )
 
         command = command or description or "(commande non transmise)"
+        session_key = str(session_key)
+        hermes_request_id = str(request_id) if request_id else self._bind_hermes_request(session_key)
         request_id = f"req-{uuid.uuid4().hex}"
         payload = build_approval_payload(
             channel_slug=str(chat_id),
@@ -2448,13 +2471,26 @@ class PulseChatAdapter(BasePlatformAdapter):
         # Correle AVANT de poster : l'app peut repondre avant que le POST ne
         # retourne (demande deja tranchee, rejouee telle quelle) et la trame
         # arriverait sans destinataire.
-        self._gateway_approvals[request_id] = str(session_key)
+        self._gateway_approvals[request_id] = (session_key, hermes_request_id)
         while len(self._gateway_approvals) > _MAX_GATEWAY_APPROVALS:
             self._gateway_approvals.popitem(last=False)
+        # Hermes 0.23 cree chaque demande en « refus seulement » et ne la leve
+        # que lorsqu'une carte prouve qu'elle montre la commande ENTIERE. La
+        # notre la montre toujours : ``build_approval_payload`` ne coupe jamais
+        # la commande, et une commande trop longue fait refuser le POST. Levee
+        # AVANT le POST, pour la meme raison que la correlation ci-dessus : une
+        # reponse arrivee pendant l'envoi serait sinon ramenee a un refus. Le
+        # risque que garde ce verrou (un clic sur une carte qui n'a pas tout
+        # montre) n'existe pas ici : l'app ne connait notre ``req-…`` que par
+        # ce POST, qui porte la commande entiere.
+        self._set_card_deny_only(session_key, hermes_request_id, False)
 
         result = await self._post_agent_message(payload, request_id)
         if not result.success:
             self._gateway_approvals.pop(request_id, None)
+            # Hermes reprend son invite texte : la demande redevient « refus
+            # seulement » pour une carte, comme a sa creation.
+            self._set_card_deny_only(session_key, hermes_request_id, True)
             logger.warning(
                 "Pulse Chat: carte d'approbation non postee (%s) — %s ; "
                 "Hermes reprend l'invite texte",
@@ -2462,6 +2498,76 @@ class PulseChatAdapter(BasePlatformAdapter):
                 getattr(result, "error", None),
             )
         return result
+
+    def _bound_hermes_requests(self) -> set:
+        return {hermes_id for _, hermes_id in self._gateway_approvals.values() if hermes_id}
+
+    def _bind_hermes_request(self, session_key: str) -> Optional[str]:
+        """Hermes sans ``request_id`` a l'envoi (<= 0.22) : retrouver la demande dans sa file.
+
+        Hermes 0.22 donne deja un ``request_id`` a chaque demande en attente et
+        sait resoudre par lui ; seul l'appel de la carte ne le transmet pas. La
+        demande de cette carte vient d'etre mise en file, avant la notification.
+        On ne la retient que si elle est la SEULE de la session encore sans
+        carte : deux candidates, et on ne saurait pas laquelle est la notre —
+        ``None``, et la resolution refusera de trancher a l'aveugle.
+        """
+        if list_gateway_approvals is None:
+            return None
+        try:
+            pending = list_gateway_approvals(session_key)
+        except Exception:  # noqa: BLE001 - sonde d'appoint
+            logger.debug("Pulse Chat: list_gateway_approvals indisponible", exc_info=True)
+            return None
+        bound = self._bound_hermes_requests()
+        candidates = [
+            entry.get("request_id")
+            for entry in pending
+            if isinstance(entry, dict) and entry.get("request_id") and entry.get("request_id") not in bound
+        ]
+        return str(candidates[0]) if len(candidates) == 1 else None
+
+    @staticmethod
+    def _set_card_deny_only(session_key: str, hermes_request_id: Optional[str], restricted: bool) -> None:
+        if restrict_gateway_approval_card_to_deny is None or not hermes_request_id:
+            return
+        try:
+            restrict_gateway_approval_card_to_deny(session_key, hermes_request_id, restricted=restricted)
+        except Exception:  # noqa: BLE001 - la resolution reste possible en refus
+            logger.warning("Pulse Chat: verrou « refus seulement » non modifie", exc_info=True)
+
+    def _resolve_gateway_decision(self, session_key: str, decision: str, hermes_request_id: Optional[str]) -> int:
+        """Rend la decision a la demande EXACTE d'Hermes ; ``0`` si rien n'est tranche.
+
+        Par ordre de preference, selon ce que l'Hermes charge sait faire :
+        1. ``resolve_gateway_approval_card`` (0.23) : ne tranche que la demande
+           de la carte, et respecte le verrou « refus seulement » ;
+        2. ``resolve_gateway_approval(..., request_id=)`` (0.22) : meme cible,
+           sans verrou ;
+        3. l'ancien appel FIFO, seulement s'il n'y a qu'UNE demande en attente
+           dans la session — sinon il trancherait peut-etre celle d'une autre
+           carte. On refuse alors : l'attente expire et Hermes refuse, ce qui
+           vaut mieux qu'executer une commande que personne n'a approuvee.
+        """
+        if hermes_request_id:
+            if resolve_gateway_approval_card is not None:
+                return resolve_gateway_approval_card(session_key, decision, hermes_request_id)
+            if _accepts_keyword(resolve_gateway_approval, "request_id"):
+                return resolve_gateway_approval(session_key, decision, request_id=hermes_request_id)
+        if list_gateway_approvals is not None:
+            try:
+                pending = len(list_gateway_approvals(session_key))
+            except Exception:  # noqa: BLE001
+                pending = None
+            if pending is not None and pending > 1:
+                logger.warning(
+                    "Pulse Chat: decision %s non appliquee — %d demandes en attente dans la "
+                    "session et aucun identifiant Hermes pour choisir la bonne",
+                    decision,
+                    pending,
+                )
+                return 0
+        return resolve_gateway_approval(session_key, decision)
 
     def _handle_approval_reply(self, data: Dict[str, Any]) -> None:
         """Trame ``approval.reply`` -> resolution de l'attente correspondante."""
@@ -2472,9 +2578,12 @@ class PulseChatAdapter(BasePlatformAdapter):
         # Deux origines possibles, jamais les deux pour un meme requestId : le
         # garde-fou du gateway (l'attente vit chez Hermes) ou un appel explicite
         # a ``request_approval`` (l'attente vit ici).
-        session_key = self._gateway_approvals.pop(reply["requestId"], None)
-        if session_key is not None:
-            resolved = resolve_gateway_approval(session_key, reply["decision"])
+        # ``pop`` : une decision rejouee ou dupliquee ne trouve plus rien et
+        # tombe dans la trace « sans attente active » plus bas.
+        gateway = self._gateway_approvals.pop(reply["requestId"], None)
+        if gateway is not None:
+            session_key, hermes_request_id = gateway
+            resolved = self._resolve_gateway_decision(session_key, reply["decision"], hermes_request_id)
             if not resolved:
                 # Le garde-fou d'Hermes a son propre delai (300 s par defaut) :
                 # passe ce delai il a deja refuse, et le clic arrive trop tard.
