@@ -22,7 +22,7 @@ hermes-plugin/pulse-chat/
 ├── netguard.py         # garde-fous réseau : schémas, redirections, clair, journaux
 ├── skills/             # skills enregistrés (guide, interface, …)
 ├── tests/              # pytest (sans hermes installé)
-└── tests_hermes/       # le plugin contre de vrais Hermes épinglés (matrice CI)
+└── tests_hermes/       # vrais Hermes épinglés et Hermes éphémère de bout en bout (matrice CI)
 ```
 
 
@@ -651,16 +651,39 @@ avec le vrai Hermes installé depuis son `uv.lock`, épinglé par commit :
 bot qui affiche ces numéros tourne sur une image intermédiaire, à identifier
 par son commit avant de conclure. En dessous de v0.21.6 rien n'est garanti.
 
-`tests_hermes/` vérifie, sur chacune : chargement par le vrai chargeur de
-plugins et enregistrement de la plateforme `pulse_chat` ; signatures des
-méthodes surchargées (aucune ne doit refuser un argument que la base de cet
-Hermes déclare) ; approbations sur la vraie file du garde-fou — once, deny,
-expiration (jamais d'accord sans réponse), rejeu d'une décision, deux demandes
-concurrentes —, avec l'ancienne **et** la nouvelle forme d'appel. Lancer une
-version à la main : `PYTHON=python3.14 sh tests_hermes/run.sh <commit>` (exige
-`uv`). Ne sont **pas** couverts par la matrice : le tour complet du runner
-(modèle, WebSocket vers l'app), clarify, sous-agents, navigateur, coffre et
-audio. Ceux-là restent couverts par `tests/` avec des stubs seulement.
+`tests_hermes/` tourne sur chacune, en deux niveaux :
+
+- `test_hermes_reel.py`, sur les vrais modules d'Hermes : chargement par le
+  vrai chargeur de plugins et enregistrement de la plateforme `pulse_chat` ;
+  signatures des méthodes surchargées (aucune ne doit refuser un argument que
+  la base de cet Hermes déclare) ; approbations sur la vraie file du
+  garde-fou, avec l'ancienne **et** la nouvelle forme d'appel.
+- `test_e2e_gateway.py`, sur un **Hermes éphémère** : `hermes gateway run`
+  réel, plugin chargé par Hermes lui-même, avec une fausse app Pulse Chat
+  (WebSocket `/ws/hermes` et routes `/api/*`) et un faux modèle compatible
+  OpenAI qui joue un script (`e2e_banc.py`). HOME et HERMES_HOME jetables,
+  rien ne sort de `127.0.0.1`. Scénarios : aller-retour texte et ack ;
+  approbations once, deny, expiration, décision rejouée, deux commandes
+  dangereuses dans le même tour (le vrai outil `terminal` exécute ou non
+  la commande) ; question `clarify` en carte ; sous-agent (`delegate_task`,
+  synchrone ou en arrière-plan selon la version) ; écriture au coffre
+  (`pulse_vault_write`, `PUT /api/agent/vault/…`) ; voix (`text_to_speech`
+  sur une synthèse factice, `POST /api/agent/voice/<canal>`) ; navigateur
+  (`browser_exec` avec `browser.cloud_provider: pulse`, session demandée à
+  l'app pour le canal de la conversation).
+
+Lancer une version à la main : `PYTHON=python3.14 sh tests_hermes/run.sh
+<commit> [arguments pytest]` (exige `uv`). Limites assumées : le modèle est un
+script, l'app une imitation de son contrat (pas l'app Nuxt), le navigateur
+s'arrête à la demande de session (l'app répond 501, aucun Chromium distant),
+la transcription d'une note vocale entrante n'est pas jouée (il faudrait un
+fournisseur STT).
+
+Deux points relevés sur le vrai Hermes, utiles pour lire un journal de bot :
+depuis 0.23, les outils du plugin (`pulse_vault_write`, etc.) ne sont plus dans
+la liste directe du modèle, il les atteint par `tool_search` / `tool_call` ;
+et l'outil navigateur s'appelle `browser_exec` (aucune version testée n'a de
+`browser_navigate`).
 
 **Approbations, ce que fait le plugin selon l'Hermes chargé.** Il détecte les
 API réellement présentes (imports gardés, signature lue par `inspect`), jamais

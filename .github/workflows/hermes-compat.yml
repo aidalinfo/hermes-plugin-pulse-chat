@@ -3,8 +3,9 @@
 # - unitaires : `pytest tests`, sans Hermes (stubs) ;
 # - matrice : `tests_hermes/run.sh <commit>` installe Hermes depuis son uv.lock
 #   (Python 3.14, seule cible de ses dependances) et lance tests_hermes/ :
-#   vrai chargeur de plugins, vrai registre des plateformes, vraie file du
-#   garde-fou. HOME et HERMES_HOME temporaires, aucun secret.
+#   vrais modules d'Hermes, puis un Hermes EPHEMERE complet (`hermes gateway
+#   run`, fausse app Pulse Chat, faux modele scenarise). HOME et HERMES_HOME
+#   temporaires, aucun secret, rien hors 127.0.0.1 une fois Hermes installe.
 #
 # Ajouter une version : son tag ET le commit qu'il designe
 # (`git ls-remote --tags https://github.com/NousResearch/hermes-agent 'refs/tags/vX.Y.Z^{}'`).
@@ -49,6 +50,7 @@ jobs:
           - version: v0.23.1
             commit: 3b421578588243f920886e6fe79a6faa87ea026e
     name: Hermes ${{ matrix.version }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
