@@ -109,8 +109,12 @@ def test_le_vrai_chargeur_enregistre_la_plateforme():
 
     from gateway.platform_registry import platform_registry
 
-    names = set(getattr(platform_registry, "_entries", {}) or {}) | set(manager._plugin_platform_names)
-    assert "pulse-chat" in names or any("pulse" in str(n) for n in names), names
+    # ``get`` charge aussi une plateforme differee, comme le gateway au demarrage.
+    entry = platform_registry.get("pulse_chat")
+    assert entry is not None, sorted(platform_registry.registered_names())
+    assert entry.source == "plugin"
+    assert callable(entry.adapter_factory)
+    assert entry.check_fn() is True
 
 
 def test_l_adaptateur_herite_du_vrai_BasePlatformAdapter():
