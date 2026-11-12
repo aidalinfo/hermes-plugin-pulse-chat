@@ -296,7 +296,11 @@ class Gateway:
     def __init__(self, root: pathlib.Path, llm: FakeLLM, app: FakeApp, approval_timeout: int = 30):
         self.root = root
         self.home = root / "home"
-        self.hermes_home = self.home / ".hermes"
+        self.home.mkdir()
+        # HERMES_HOME HORS de ``$HOME/.hermes`` : lance depuis pytest, Hermes
+        # refuse d'ouvrir un state.db sous ``$HOME/.hermes`` (« live-system
+        # guard », il le prend pour celui d'une vraie installation).
+        self.hermes_home = root / "hermes-home"
         plugin = self.hermes_home / "plugins" / "pulse-chat"
         plugin.mkdir(parents=True)
         for path in PLUGIN_DIR.iterdir():
@@ -319,7 +323,8 @@ class Gateway:
             f"  cwd: {self.workspace}\n",
             encoding="utf-8",
         )
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("HERMES_", "PULSE_", "OPENAI", "ANTHROPIC", "OPENROUTER"))}
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("HERMES_", "PULSE_", "OPENAI", "ANTHROPIC", "OPENROUTER", "PYTEST"))}
         env.update({
             "HOME": str(self.home),
             "HERMES_HOME": str(self.hermes_home),
