@@ -215,19 +215,24 @@ def test_clarify_en_carte_et_reponse(banc):
 
 
 def test_sous_agent_rend_son_resultat(banc):
+    """``delegate_task`` : synchrone sur un Hermes ancien (le resultat revient
+    dans l'outil), en arriere-plan depuis 0.23 (il revient en message). Dans
+    les deux cas, le parent doit le recevoir et repondre dans le canal."""
     llm, app, gw = banc
     slug = _slug()
     llm.scripts["enfant"] = lambda results: {"text": "RESULTAT-SOUS-AGENT"}
+    llm.triggers["RESULTAT-SOUS-AGENT"] = lambda results: {"text": "RELAIS-PARENT"}
 
     def parent(results):
         if not results:
             return {"tool": "delegate_task", "args": {"tasks": [{"goal": "E2E:enfant reponds simplement"}]}}
-        return _final_after_tools(results)
+        if any("RESULTAT-SOUS-AGENT" in r for r in results):
+            return {"text": "RELAIS-PARENT"}
+        return {"text": "ATTENTE-SOUS-AGENT"}
 
     llm.scripts["parent"] = parent
     app.say(slug, "E2E:parent")
-    final = _final_text(app, slug, "FIN", gw)
-    assert "RESULTAT-SOUS-AGENT" in str(final["content"])
+    _final_text(app, slug, "RELAIS-PARENT", gw)
 
 
 def test_coffre_ecriture_part_vers_l_app(banc):
@@ -243,7 +248,7 @@ def test_coffre_ecriture_part_vers_l_app(banc):
     app.say(slug, "E2E:coffre")
     _final_text(app, slug, "FIN", gw)
     writes = [p for p in app.posts if p["path"].startswith(f"/api/agent/vault/{slug}/")]
-    assert writes and writes[0]["method"] == "PUT", app.posts[-5:]
+    assert writes and writes[0]["method"] == "PUT", [m.get("content") for m in app.messages(slug)]
     assert writes[0]["path"].endswith("rapports/e2e.md")
 
 

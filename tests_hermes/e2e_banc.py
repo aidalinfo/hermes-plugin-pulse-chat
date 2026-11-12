@@ -79,6 +79,9 @@ class FakeLLM:
         self.port = free_port()
         self.base_url = f"http://127.0.0.1:{self.port}/v1"
         self.scripts: Dict[str, Callable[[List[str]], Dict[str, Any]]] = {}
+        # Declencheurs prioritaires : sous-chaine du dernier message humain ->
+        # script (ex. le resultat d'un sous-agent qui revient en message).
+        self.triggers: Dict[str, Callable[[List[str]], Dict[str, Any]]] = {}
         self.requests: List[Dict[str, Any]] = []
         banc = self
 
@@ -152,11 +155,14 @@ class FakeLLM:
         if last_user is None:
             return {"text": "ok"}
         text = _text(messages[last_user])
-        scenario = next((name for name in self.scripts if f"E2E:{name}" in text), None)
-        if scenario is None:
-            return {"text": "ok"}
         results = [_text(m) for m in messages[last_user + 1:] if m.get("role") == "tool"]
-        reply = dict(self.scripts[scenario](results))
+        script = next((fn for needle, fn in self.triggers.items() if needle in text), None)
+        if script is None:
+            scenario = next((name for name in self.scripts if f"E2E:{name}" in text), None)
+            if scenario is None:
+                return {"text": "ok"}
+            script = self.scripts[scenario]
+        reply = dict(script(results))
         if "tool" in reply:
             reply = {"tools": [{"tool": reply["tool"], "args": reply["args"]}]}
         for call in reply.get("tools") or []:
@@ -323,6 +329,9 @@ class Gateway:
             "  api_key: e2e-sans-valeur\n"
             "  context_length: 200000\n"
             "plugins:\n  enabled:\n    - pulse-chat\n"
+            # Le toolset du plugin (coffre, publication…) est opt-in chez Hermes :
+            # une plateforme de plugin n'a par defaut que ``hermes-<plateforme>``.
+            "platform_toolsets:\n  pulse_chat: [hermes-pulse_chat, pulse_chat]\n"
             f"approvals:\n  mode: manual\n  timeout: {approval_timeout}\n"
             "terminal:\n  backend: local\n"
             f"  cwd: {self.workspace}\n",
