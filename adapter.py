@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import inspect
 import json
 import logging
 import mimetypes
@@ -282,6 +283,38 @@ except ImportError:  # pragma: no cover - Hermes trop ancien / hors gateway
     # traitee dans ``send_exec_approval``, qui rend alors la main a Hermes pour
     # qu'il reprenne son invite texte — cf. le commentaire la-bas.
     resolve_gateway_approval = None  # type: ignore[assignment]
+
+# API FACULTATIVES du garde-fou, chacune importee a part : leur absence ne doit
+# rien couter d'autre que la fonction qu'elles apportent. On detecte ce que
+# l'Hermes charge SAIT faire, jamais son numero de version (une image de canal
+# ou un correctif retroporte le rendrait faux).
+try:  # Hermes >= 0.23 : une carte ne tranche QUE sa propre demande (#62359)
+    from tools.approval import resolve_gateway_approval_card
+except ImportError:  # pragma: no cover - Hermes <= 0.22
+    resolve_gateway_approval_card = None  # type: ignore[assignment]
+
+try:  # Hermes >= 0.23 : verrou « refus seulement » tant que la carte n'a pas tout montre
+    from tools.approval import restrict_gateway_approval_card_to_deny
+except ImportError:  # pragma: no cover - Hermes <= 0.22
+    restrict_gateway_approval_card_to_deny = None  # type: ignore[assignment]
+
+try:  # Demandes en attente d'une session, avec leur ``request_id`` (Hermes 0.22)
+    from tools.approval import list_gateway_approvals
+except ImportError:  # pragma: no cover - Hermes plus ancien
+    list_gateway_approvals = None  # type: ignore[assignment]
+
+
+def _accepts_keyword(fn: Any, name: str) -> bool:
+    """``fn`` accepte-t-elle l'argument nomme ``name`` ? Sonde d'API, pas de version.
+
+    ``False`` quand la signature est illisible : on garde alors l'ancien appel,
+    le seul dont on soit sur qu'il ne leve pas ``TypeError``.
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 try:  # Primitive ``clarify`` d'Hermes (question posee a l'humain)
     from tools.clarify_gateway import resolve_gateway_clarify
@@ -628,11 +661,14 @@ class PulseChatAdapter(BasePlatformAdapter):
         # ``approval.reply``. Elles SURVIVENT a une coupure WS : l'app rejoue
         # les decisions non livrees au prochain hello.
         self._pending_approvals: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
-        # Approbations issues du GARDE-FOU d'Hermes : requestId -> session_key.
-        # Rien a debloquer ici — c'est Hermes qui tient le thread agent bloque,
-        # et c'est ``resolve_gateway_approval`` qui le relache. On ne garde donc
-        # que de quoi retrouver la session au retour de la decision.
-        self._gateway_approvals: "OrderedDict[str, str]" = OrderedDict()
+        # Approbations issues du GARDE-FOU d'Hermes : requestId de l'app ->
+        # (session_key, request_id d'Hermes ou None). Rien a debloquer ici —
+        # c'est Hermes qui tient le thread agent bloque, et c'est
+        # ``resolve_gateway_approval`` qui le relache. On ne garde donc que de
+        # quoi retrouver la session ET la demande exacte au retour de la
+        # decision. Les deux identifiants restent distincts : l'app ne voit
+        # jamais celui d'Hermes, Hermes ne voit jamais celui de l'app.
+        self._gateway_approvals: "OrderedDict[str, Tuple[str, Optional[str]]]" = OrderedDict()
         # Questions posees en CARTE : clarify_id -> channel_slug. Rien a
         # debloquer ici non plus — l'attente vit dans le process Hermes
         # (``tools/clarify_gateway``), et c'est ``resolve_gateway_clarify`` qui
