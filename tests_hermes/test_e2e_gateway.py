@@ -9,6 +9,7 @@ du plugin. Le modele, lui, est un script (cf. ``e2e_banc.FakeLLM``).
 """
 
 import pathlib
+import re
 import shutil
 import tempfile
 import time
@@ -269,7 +270,10 @@ def test_voix_la_synthese_part_vers_l_app(banc):
     def script(results):
         if not results:
             return {"tool": "text_to_speech", "args": {"text": "Bonjour depuis le banc"}}
-        return _final_after_tools(results)
+        # Comme un vrai modele : recopier la balise MEDIA (et la demande de
+        # note vocale) que l'outil rend, c'est elle que la gateway livre.
+        tags = re.findall(r"\[\[audio_as_voice\]\]|MEDIA:\S+", " ".join(results))
+        return {"text": "FIN " + " ".join(t.strip('",}') for t in tags)}
 
     llm.scripts["voix"] = script
     app.say(slug, "E2E:voix", messageType="voice")
@@ -279,7 +283,7 @@ def test_voix_la_synthese_part_vers_l_app(banc):
 
 
 def test_navigateur_passe_par_le_fournisseur_pulse(banc):
-    """``browser.cloud_provider: pulse`` : le vrai outil navigateur doit
+    """``browser.cloud_provider: pulse`` : le vrai outil ``browser_exec`` doit
     demander sa session a l'app, pour le canal de la conversation. L'app
     repond 501 (pas de navigateur) : on verifie le branchement, pas Chromium."""
     llm, app, gw = banc
@@ -288,7 +292,7 @@ def test_navigateur_passe_par_le_fournisseur_pulse(banc):
 
     def script(results):
         if not results:
-            return {"tool": "browser_navigate", "args": {"url": "https://example.com"}}
+            return {"tool": "browser_exec", "args": {"code": "goto('https://example.com')\nprint(page_info())"}}
         return _final_after_tools(results)
 
     llm.scripts["navigateur"] = script
