@@ -284,3 +284,31 @@ def test_deux_demandes_concurrentes_chacune_sa_decision(banc):
     t2.join(timeout=5)
     assert out1.get("choice") == "once", out1
     assert out2.get("choice") == "deny", out2
+
+
+def test_chaque_surcharge_accepte_les_arguments_de_la_base():
+    """Le piege de l'issue #59, generalise : une methode de ``BasePlatformAdapter``
+    surchargee ici doit accepter TOUT argument nomme que la base de cet Hermes
+    declare — le runner appelle la base, pas notre signature."""
+    from gateway.platforms.base import BasePlatformAdapter
+
+    cls = adapter_module.PulseChatAdapter
+    problems = []
+    for name, ours in vars(cls).items():
+        base = getattr(BasePlatformAdapter, name, None)
+        if not callable(ours) or not callable(base) or name.startswith("__"):
+            continue
+        try:
+            base_params = inspect.signature(base).parameters
+            our_sig = inspect.signature(ours)
+        except (TypeError, ValueError):
+            continue
+        our_params = our_sig.parameters
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in our_params.values()):
+            continue
+        for pname, p in base_params.items():
+            if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                continue
+            if pname not in our_params:
+                problems.append(f"{name}({pname})")
+    assert not problems, f"surcharges qui leveraient TypeError : {problems}"
