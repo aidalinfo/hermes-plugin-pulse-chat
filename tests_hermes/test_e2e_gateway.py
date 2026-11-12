@@ -258,3 +258,42 @@ def test_message_vocal_sans_media_reste_un_tour_normal(banc):
     slug = _slug()
     app.say(slug, "E2E:vocal", messageType="voice")
     _final_text(app, slug, "PONG-VOCAL", gw)
+
+
+def test_voix_la_synthese_part_vers_l_app(banc):
+    """Le vrai outil ``text_to_speech`` (synthese factice) : le fichier produit
+    doit partir vers l'app par ``POST /api/agent/voice/<canal>``."""
+    llm, app, gw = banc
+    slug = _slug()
+
+    def script(results):
+        if not results:
+            return {"tool": "text_to_speech", "args": {"text": "Bonjour depuis le banc"}}
+        return _final_after_tools(results)
+
+    llm.scripts["voix"] = script
+    app.say(slug, "E2E:voix", messageType="voice")
+    wait_until(lambda: [p for p in app.posts if p["path"] == f"/api/agent/voice/{slug}"], TURN_S,
+               "POST de la voix", gw)
+    assert llm.speech and llm.speech[0].get("input") == "Bonjour depuis le banc"
+
+
+def test_navigateur_passe_par_le_fournisseur_pulse(banc):
+    """``browser.cloud_provider: pulse`` : le vrai outil navigateur doit
+    demander sa session a l'app, pour le canal de la conversation. L'app
+    repond 501 (pas de navigateur) : on verifie le branchement, pas Chromium."""
+    llm, app, gw = banc
+    slug = _slug()
+    app.responses[("POST", "/api/agent/browser/sessions")] = (501, {"error": "browser_unavailable"})
+
+    def script(results):
+        if not results:
+            return {"tool": "browser_navigate", "args": {"url": "https://example.com"}}
+        return _final_after_tools(results)
+
+    llm.scripts["navigateur"] = script
+    app.say(slug, "E2E:navigateur")
+    _final_text(app, slug, "FIN", gw)
+    sessions = [p for p in app.posts if p["path"] == "/api/agent/browser/sessions"]
+    assert sessions, [m.get("content") for m in app.messages(slug)]
+    assert sessions[0]["body"].get("channel") == slug

@@ -83,6 +83,7 @@ class FakeLLM:
         # script (ex. le resultat d'un sous-agent qui revient en message).
         self.triggers: Dict[str, Callable[[List[str]], Dict[str, Any]]] = {}
         self.requests: List[Dict[str, Any]] = []
+        self.speech: List[Dict[str, Any]] = []
         banc = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -107,6 +108,17 @@ class FakeLLM:
             def do_POST(self):
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length) or b"{}")
+                if self.path.rstrip("/").endswith("/audio/speech"):
+                    # Synthese vocale factice : quelques trames MP3 muettes.
+                    banc.speech.append(body)
+                    frame = b"\xff\xfb\x90\x64" + b"\x00" * 413
+                    data = frame * 20
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/mpeg")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 if not self.path.rstrip("/").endswith("/chat/completions"):
                     self._json(404, {"error": f"route inconnue {self.path}"})
                     return
@@ -219,6 +231,8 @@ class FakeApp:
         self.frames_in: List[Dict[str, Any]] = []  # recues du plugin par WS
         self.posts: List[Dict[str, Any]] = []      # {path, method, body}
         self.ws: Optional[WebSocket] = None
+        # Reponses imposees : (methode, prefixe de chemin) -> (statut, corps).
+        self.responses: Dict[tuple, tuple] = {}
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self._lock = threading.Lock()
         app_self = self
@@ -257,6 +271,9 @@ class FakeApp:
                     body = {"_raw_bytes": len(raw)}
             with app_self._lock:
                 app_self.posts.append({"path": request.url.path, "method": request.method, "body": body})
+            for (method, prefix), (status, payload) in app_self.responses.items():
+                if request.method == method and request.url.path.startswith(prefix):
+                    return JSONResponse(payload, status_code=status)
             return JSONResponse({"ok": True, "id": uuid.uuid4().hex})
 
         routes = [WebSocketRoute("/ws/hermes", ws_endpoint),
@@ -342,6 +359,11 @@ class Gateway:
             "plugins:\n  enabled:\n    - pulse-chat\n"
 
             f"approvals:\n  mode: manual\n  timeout: {approval_timeout}\n"
+            # Voix : synthese OpenAI pointee sur le faux modele (aucun reseau).
+            "tts:\n  provider: openai\n  openai:\n"
+            f"    base_url: {llm.base_url}\n    api_key: e2e-sans-valeur\n    model: tts-1\n"
+            # Navigateur : le fournisseur du plugin, choisi comme sur un bot.
+            "browser:\n  cloud_provider: pulse\n"
             "terminal:\n  backend: local\n"
             f"  cwd: {self.workspace}\n",
             encoding="utf-8",
