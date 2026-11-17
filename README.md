@@ -980,6 +980,74 @@ d'un skill retirés, note ajoutée au premier tour d'une session et pas au suiva
 Pulse Chat (avec #432) dit à l'écran quand le plugin d'un agent est trop ancien
 pour appliquer ces réglages.
 
+### Accès IA affecté dans Pulse (trame `agent.ai`)
+
+À partir de la **1.27.0**. Affecter un compte IA à un agent dans Pulse Chat
+n'autorise que la passerelle de Pulse (`/api/agent/ai-gateway/<profil>/v1`) : si
+le `config.yaml` du bot appelle encore un autre fournisseur, l'affectation ne
+sert à rien. Pulse envoie donc ce que le bot doit appeler, à chaque connexion et
+à chaque changement d'affectation :
+
+```json
+{ "type": "agent.ai", "profile": "zephyr", "routing": {
+  "primary":  { "model": "gpt-6.1-terra", "apiMode": "codex_responses", "path": "/api/agent/ai-gateway/zephyr/v1" },
+  "fallback": { "model": "claude-sonnet-5-5", "apiMode": "anthropic_messages", "path": "/api/agent/ai-gateway/zephyr/fallback/v1" } } }
+```
+
+Aucun crochet de plugin ne change le modèle d'Hermes : le plugin écrit la
+**couche gérée** d'Hermes (`$HERMES_MANAGED_DIR/config.yaml`, fusionnée feuille à
+feuille par-dessus le `config.yaml` du bot), relue à chaque message. Hermes
+≥ v2026.9.13 reconstruit l'agent au **message suivant, sans redémarrage** ; avant,
+il faut redémarrer. Ce qui est écrit (`ai_routing.py`) :
+
+```yaml
+providers:
+  pulse-ai:                       # fournisseur NOMMÉ : garde codex_responses
+    base_url: <PULSE_CHAT_URL>/api/agent/ai-gateway/zephyr/v1
+    api_mode: codex_responses
+    key_env: PULSE_CHAT_AGENT_TOKEN
+  pulse-ai-fallback:              # seulement avec un fallback
+    base_url: <PULSE_CHAT_URL>/api/agent/ai-gateway/zephyr/fallback/v1
+    api_mode: anthropic_messages  # Hermes retire le /v1 final et appelle …/fallback/v1/messages
+    key_env: PULSE_CHAT_AGENT_TOKEN
+model:
+  provider: pulse-ai
+  default: gpt-6.1-terra
+  base_url: <même adresse>
+  api_mode: codex_responses
+  api_key: ""                     # neutralise un model.api_key du bot (sa propre clé)
+fallback_providers: []            # ou [{provider: pulse-ai-fallback, model: …}]
+```
+
+- **Clé** : jamais dans la trame ni dans le fichier. C'est le secret d'agent
+  `pca_…` (`PULSE_CHAT_AGENT_TOKEN`), lu par `key_env`. Sans lui, rien n'est
+  écrit (la passerelle refuserait le jeton de service).
+- **`routing: null`** : Pulse ne gère pas l'accès IA de ce bot ; le plugin
+  retire ce qu'il avait posé et restaure ce qu'il avait remplacé — le bot revient
+  à son propre `config.yaml`. Une reconnexion ne retire rien (Pulse renvoie la
+  trame).
+- **Où** : `HERMES_MANAGED_DIR` s'il est posé. Sinon, si `/etc/hermes` existe,
+  rien n'est écrit (couche de l'exploitant, un journal le dit). Sinon
+  `<HERMES_HOME>/pulse-managed`, et le plugin pose `HERMES_MANAGED_DIR` dans
+  l'environnement du processus (à la première trame, puis à chaque chargement).
+  Un `hermes` lancé à part (CLI) ne voit pas ce dossier sans la variable.
+- **Fichier partagé** : seules `providers.pulse-ai`, `providers.pulse-ai-fallback`,
+  `model` et `fallback_providers` sont touchées ; ce qui a été écrit et remplacé
+  est retenu dans `.pulse-chat-ai.json` à côté. Une clé modifiée par un tiers
+  depuis n'est pas restaurée. Les **commentaires** d'un fichier de l'exploitant
+  sont perdus à la première écriture. Écriture atomique, rien réécrit si rien ne
+  change ; dossier non inscriptible ⇒ avertissement, rien d'autre.
+- **Un seul profil** : la couche gérée vaut pour tout le processus. Un bot qui
+  sert plusieurs profils Pulse (`PULSE_CHAT_PROFILE=a,b`) n'écrit rien.
+- **Trame inconnue** (`apiMode` hors `chat_completions` / `codex_responses` /
+  `anthropic_messages`, chemin qui ne commence pas par `/` ou ne finit pas par
+  `/v1`) : ignorée, un journal le dit.
+
+Recette sur un vrai bot : affecter un compte dans Pulse, envoyer un message sans
+redémarrer ⇒ l'appel arrive à la passerelle (carte « Dernière réponse du
+modèle » à ok) ; `hermes fallback check --live --json` (avec
+`HERMES_MANAGED_DIR` posé) vérifie la chaîne.
+
 ### Battement de vie du pilotage (Pulse Pilotage, CDC §7.5)
 
 À partir de la **1.19.0**. Une carte lancée depuis **Pulse Pilotage** est une
@@ -1185,5 +1253,5 @@ délai de grâce (`HERMES_HELLO_GRACE_MS` côté app, 5 s par défaut).
 Sans hermes installé (la classification est un module pur) :
 
 ```bash
-python3 -m pytest hermes-plugin/ -q
+python3 -m pytest hermes-plugin/ -q   # pip install pytest websockets pyyaml
 ```

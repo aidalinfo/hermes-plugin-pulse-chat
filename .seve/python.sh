@@ -21,5 +21,5 @@ if [ ! -x "$DEST/bin/python3" ]; then
   rm -f .seve-cache/python.tar.gz
 fi
 
-"$DEST/bin/python3" -c "import pytest, websockets" 2>/dev/null \
-  || "$DEST/bin/python3" -m pip install -q --disable-pip-version-check pytest websockets
+"$DEST/bin/python3" -c "import pytest, websockets, yaml" 2>/dev/null \
+  || "$DEST/bin/python3" -m pip install -q --disable-pip-version-check pytest websockets pyyaml

@@ -54,6 +54,7 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 from .agent_settings import AgentSettingsStore, refusal_message
+from . import ai_routing
 from .approvals import (
     GATEWAY_APPROVAL_TOOL,
     build_approval_payload,
@@ -482,6 +483,29 @@ def _get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
 _WARNED_ONCE: set = set()
 
 
+def _hermes_home() -> Optional[pathlib.Path]:
+    """HERMES_HOME actif d'Hermes, ``None`` hors Hermes."""
+    try:
+        from hermes_constants import get_hermes_home
+
+        return pathlib.Path(get_hermes_home())
+    except Exception:
+        home = os.getenv("HERMES_HOME")
+        return pathlib.Path(home) if home else None
+
+
+def _point_managed_dir_at_load() -> None:
+    """Au chargement : si le plugin a deja pose une couche geree (redemarrage),
+    ``HERMES_MANAGED_DIR`` la designe de nouveau AVANT le premier message —
+    sans attendre la trame ``agent.ai`` de la connexion."""
+    try:
+        directory, reason = ai_routing.resolve_managed_dir(_hermes_home(), create=False)
+        if directory is not None and reason != "HERMES_MANAGED_DIR":
+            logger.info("Pulse Chat: couche geree de l'acces IA : %s", reason)
+    except Exception:
+        logger.debug("Pulse Chat: couche geree non resolue au chargement", exc_info=True)
+
+
 def _warn_once(key: str, message: str) -> None:
     if key in _WARNED_ONCE:
         return
@@ -767,6 +791,74 @@ class PulseChatAdapter(BasePlatformAdapter):
         _AGENT_SETTINGS.update(profile, data)
         logger.info("Pulse Chat: reglages de l'agent %s recus", profile)
 
+    def _handle_agent_ai(self, data: Dict[str, Any]) -> None:
+        """Trame ``agent.ai`` : acces IA affecte dans Pulse Chat, ecrit dans la
+        couche geree d'Hermes (``ai_routing``) — applique au message suivant,
+        sans redemarrage (Hermes >= v2026.9.13).
+
+        La couche geree vaut pour tout le PROCESSUS : elle n'est ecrite que si
+        ce bot sert un seul profil Pulse, celui de la trame."""
+        profile = str(data.get("profile") or "")
+        if not profile:
+            return
+        try:
+            routing = ai_routing.parse_frame(data)
+        except ai_routing.RoutingError as exc:
+            logger.warning("Pulse Chat: acces IA de %s ignore — trame invalide (%s)", profile, exc)
+            return
+        if self.profiles != [profile]:
+            logger.warning(
+                "Pulse Chat: acces IA de %s non applique — ce processus sert %s ; "
+                "la couche geree d'Hermes vaut pour tout le processus (un seul profil requis)",
+                profile, ", ".join(self.profiles),
+            )
+            return
+        if routing is not None and not self.agent_token:
+            # La passerelle n'accepte que le secret d'agent : sans lui, le bot
+            # perdrait tout acces IA. Son propre config.yaml reste en vigueur.
+            logger.warning(
+                "Pulse Chat: acces IA de %s non applique — %s absent (secret pca_ "
+                "requis par la passerelle de Pulse)", profile, ai_routing.KEY_ENV,
+            )
+            return
+        directory, reason = ai_routing.resolve_managed_dir(
+            _hermes_home(), create=routing is not None,
+        )
+        if directory is None:
+            if routing is not None:
+                logger.warning(
+                    "Pulse Chat: acces IA de %s non applique — pas de couche geree "
+                    "inscriptible (%s)", profile, reason,
+                )
+            return
+        writer = ai_routing.ManagedConfigWriter(directory)
+        try:
+            changed = (
+                writer.apply(routing, self.base_url) if routing is not None else writer.remove()
+            )
+        except OSError as exc:
+            logger.warning(
+                "Pulse Chat: acces IA de %s non applique — ecriture impossible dans %s (%s)",
+                profile, directory, exc,
+            )
+            return
+        if routing is None:
+            if changed:
+                logger.info(
+                    "Pulse Chat: acces IA de %s retire de %s — le bot revient a son config.yaml",
+                    profile, writer.config_path,
+                )
+            return
+        if changed:
+            logger.info(
+                "Pulse Chat: acces IA de %s ecrit dans %s — %s (%s)%s, applique au "
+                "message suivant (Hermes >= v2026.9.13, sinon au redemarrage)",
+                profile, writer.config_path, routing.primary.model, routing.primary.api_mode,
+                f", repli {routing.fallback.model}" if routing.fallback else "",
+            )
+        else:
+            logger.debug("Pulse Chat: acces IA de %s inchange", profile)
+
     def _handle_hello_ack(self, data: Dict[str, Any]) -> None:
         """Trame ``hello.ack`` -> memorisation du jeton (sans interpretation)."""
         token = session_token_from_ack(data)
@@ -1036,6 +1128,11 @@ class PulseChatAdapter(BasePlatformAdapter):
                         self._handle_agent_settings(data)
                     except Exception:
                         logger.exception("Pulse Chat: erreur de traitement agent.settings")
+                elif data.get("type") == "agent.ai":
+                    try:
+                        self._handle_agent_ai(data)
+                    except Exception:
+                        logger.exception("Pulse Chat: erreur de traitement agent.ai")
                 elif data.get("type") == "message.created":
                     try:
                         await self._handle_message_created(data)
@@ -4351,6 +4448,7 @@ def _register_knowledge_tools(ctx) -> None:
 
 def register(ctx):
     """Point d'entree plugin : appele par le systeme de plugins Hermes."""
+    _point_managed_dir_at_load()
     # AVANT l'entree de plateforme : son ``platform_hint`` ne nomme les outils
     # de connaissance que s'ils sont REELLEMENT enregistres.
     _register_knowledge_tools(ctx)
