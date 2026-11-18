@@ -312,3 +312,53 @@ def test_chaque_surcharge_accepte_les_arguments_de_la_base():
             if pname not in our_params:
                 problems.append(f"{name}({pname})")
     assert not problems, f"surcharges qui leveraient TypeError : {problems}"
+
+
+# --------------------------------------------------------------------------
+# Acces IA (trame ``agent.ai``) relu par la vraie configuration d'Hermes
+# --------------------------------------------------------------------------
+
+
+def test_agent_ai_est_ecrit_et_relu_par_hermes(tmp_path, monkeypatch, caplog):
+    """La trame passe par le VRAI environnement d'Hermes (sans PyYAML : la 1.27.0
+    y echouait sur ``import yaml``) et la configuration effective d'Hermes voit
+    le fournisseur nomme de la passerelle, sans redemarrage."""
+    from hermes_cli import managed_scope
+    from hermes_cli.config_effective import load_user_config_effective
+
+    managed = tmp_path / "geree"
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+    monkeypatch.setenv("PULSE_CHAT_AGENT_TOKEN", "pca_test")
+
+    class _AiConfig:
+        extra = {"url": "http://pulse-chat.invalid", "token": "jeton-de-test",
+                 "agent_token": "pca_test", "profile": "zephyr"}
+
+    adapter = adapter_module.PulseChatAdapter(_AiConfig())
+    adapter._handle_agent_ai({"type": "agent.ai", "profile": "zephyr", "routing": {
+        "primary": {"model": "gpt-6.1-terra", "apiMode": "codex_responses",
+                    "path": "/api/agent/ai-gateway/zephyr/v1"},
+        "fallback": {"model": "claude-sonnet-5-5", "apiMode": "anthropic_messages",
+                     "path": "/api/agent/ai-gateway/zephyr/fallback/v1"},
+    }})
+    assert (managed / "config.yaml").exists(), caplog.text
+
+    managed_scope.invalidate_managed_cache()
+    effective = load_user_config_effective()
+    url = "http://pulse-chat.invalid/api/agent/ai-gateway/zephyr/v1"
+    assert effective["model"]["provider"] == "pulse-ai"
+    assert effective["model"]["default"] == "gpt-6.1-terra"
+    assert effective["model"]["base_url"] == url
+    assert effective["providers"]["pulse-ai"] == {
+        "base_url": url, "api_mode": "codex_responses", "key_env": "PULSE_CHAT_AGENT_TOKEN",
+    }
+    assert effective["fallback_providers"] == [
+        {"provider": "pulse-ai-fallback", "model": "claude-sonnet-5-5"},
+    ]
+    # Le reste du config.yaml du bot est intact (fusion par-dessus).
+    assert "pulse-chat" in effective["plugins"]["enabled"]
+
+    # ``routing: null`` : le bot revient a son propre config.yaml.
+    adapter._handle_agent_ai({"type": "agent.ai", "profile": "zephyr", "routing": None})
+    managed_scope.invalidate_managed_cache()
+    assert "providers" not in load_user_config_effective()

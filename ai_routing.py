@@ -280,6 +280,33 @@ def _state(written: Dict[str, Any], previous: Dict[str, Any]) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- E/S
 
 
+class YamlUnavailable(RuntimeError):
+    """Aucune bibliotheque YAML importable : rien n'est lu ni ecrit."""
+
+
+def yaml_codec() -> Any:
+    """Module offrant ``safe_load`` / ``safe_dump`` (memes arguments que PyYAML).
+
+    D'abord ``hermes_yaml`` : l'interface YAML d'Hermes lui-meme (ruamel, YAML
+    1.1, celle qui relit la couche geree). Les Hermes supportes (v0.21.6 a
+    v0.23.x) n'embarquent PAS PyYAML : un ``import yaml`` echouait dans leur
+    environnement et l'acces IA n'etait jamais applique (1.27.0). PyYAML ne
+    sert qu'hors Hermes (tests unitaires, Hermes plus ancien).
+    """
+    try:
+        import hermes_yaml
+
+        return hermes_yaml
+    except ImportError:
+        pass
+    try:
+        import yaml
+
+        return yaml
+    except ImportError as exc:
+        raise YamlUnavailable("ni hermes_yaml (Hermes) ni PyYAML importables") from exc
+
+
 def _atomic_write(path: Path, text: str) -> None:
     """Fichier temporaire dans le MEME dossier + ``os.replace`` : le cache par
     signature d'Hermes ne lit jamais un demi-fichier."""
@@ -308,8 +335,7 @@ class ManagedConfigWriter:
         self.state_path = self.directory / STATE_NAME
 
     def _read_doc(self) -> Dict[str, Any]:
-        import yaml
-
+        yaml = yaml_codec()
         try:
             text = self.config_path.read_text(encoding="utf-8-sig")
         except FileNotFoundError:
@@ -331,8 +357,7 @@ class ManagedConfigWriter:
         return loaded if isinstance(loaded, dict) else {}
 
     def _write(self, doc: Dict[str, Any], state: Dict[str, Any], before: Dict[str, Any]) -> bool:
-        import yaml
-
+        yaml = yaml_codec()
         changed = doc != before
         if changed:
             if doc:

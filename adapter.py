@@ -842,6 +842,9 @@ class PulseChatAdapter(BasePlatformAdapter):
                 profile, directory, exc,
             )
             return
+        except ai_routing.YamlUnavailable as exc:
+            logger.warning("Pulse Chat: acces IA de %s non applique — %s", profile, exc)
+            return
         if routing is None:
             if changed:
                 logger.info(

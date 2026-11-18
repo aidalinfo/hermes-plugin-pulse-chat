@@ -274,3 +274,53 @@ class TestAdapter:
             assert "ecriture impossible" in caplog.text
         finally:
             os.chmod(managed, 0o700)
+
+
+# --- Bibliotheque YAML ---------------------------------------------------------
+
+class TestYamlCodec:
+    """Les Hermes supportes n'ont PAS PyYAML (1.27.0 : ``import yaml`` echouait
+    dans leur environnement, l'acces IA n'etait jamais applique)."""
+
+    def _fake_hermes_yaml(self):
+        import types
+
+        module = types.ModuleType("hermes_yaml")
+        module.calls = []
+
+        def safe_load(text):
+            module.calls.append("load")
+            return yaml.safe_load(text)
+
+        def safe_dump(data, stream=None, **kwargs):
+            module.calls.append("dump")
+            return yaml.safe_dump(data, stream, **kwargs)
+
+        module.safe_load, module.safe_dump = safe_load, safe_dump
+        return module
+
+    def test_hermes_yaml_preferred(self, tmp_path, monkeypatch):
+        fake = self._fake_hermes_yaml()
+        monkeypatch.setitem(sys.modules, "hermes_yaml", fake)
+        assert ai.yaml_codec() is fake
+        (tmp_path / "config.yaml").write_text("terminal:\n  backend: docker\n")
+        ai.ManagedConfigWriter(tmp_path).apply(ai.parse_frame(_frame()), BASE)
+        assert fake.calls == ["load", "dump"]
+
+    def test_works_without_pyyaml(self, tmp_path, monkeypatch):
+        fake = self._fake_hermes_yaml()
+        monkeypatch.setitem(sys.modules, "hermes_yaml", fake)
+        monkeypatch.setitem(sys.modules, "yaml", None)  # ``import yaml`` => ImportError
+        writer = ai.ManagedConfigWriter(tmp_path)
+        assert writer.apply(ai.parse_frame(_frame()), BASE) is True
+        assert writer.remove() is True
+
+    def test_none_available_is_logged_not_raised(self, managed, monkeypatch, caplog):
+        monkeypatch.setitem(sys.modules, "hermes_yaml", None)
+        monkeypatch.setitem(sys.modules, "yaml", None)
+        with pytest.raises(ai.YamlUnavailable):
+            ai.yaml_codec()
+        adapter = adapter_module.PulseChatAdapter(_Config())
+        adapter._handle_agent_ai(_frame())
+        assert "ni hermes_yaml" in caplog.text
+        assert not (managed / "config.yaml").exists()

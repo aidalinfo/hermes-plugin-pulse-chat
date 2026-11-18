@@ -1039,6 +1039,12 @@ fallback_providers: []            # ou [{provider: pulse-ai-fallback, model: …
   change ; dossier non inscriptible ⇒ avertissement, rien d'autre.
 - **Un seul profil** : la couche gérée vaut pour tout le processus. Un bot qui
   sert plusieurs profils Pulse (`PULSE_CHAT_PROFILE=a,b`) n'écrit rien.
+- **YAML** (1.27.1) : lu et écrit par `hermes_yaml`, l'interface YAML d'Hermes.
+  Les Hermes supportés n'embarquent pas PyYAML : en 1.27.0, `import yaml`
+  échouait dans leur environnement et l'accès IA n'était **jamais appliqué**
+  (`hermes doctor` ne le voit pas). PyYAML ne sert qu'hors Hermes ; sans aucun
+  des deux, un avertissement, rien d'écrit. `tests_hermes/` vérifie la trame
+  contre un vrai Hermes.
 - **Trame inconnue** (`apiMode` hors `chat_completions` / `codex_responses` /
   `anthropic_messages`, chemin qui ne commence pas par `/` ou ne finit pas par
   `/v1`) : ignorée, un journal le dit.
