@@ -53,12 +53,20 @@ CATALOGUE_ATTENDU = (
     "mail.forward",
     "mail.draft.update",
     "mail.draft.delete",
+    "mail.organize",
     "calendar.read",
     "calendar.write",
     "tasks.read",
     "tasks.write",
     "tasks.delete",
     "teams.post",
+    "teams.chat.post",
+    "files.read",
+    "files.write",
+    "files.delete",
+    "files.share",
+    "meetings.read",
+    "meetings.transcripts",
     "repo.read",
     "issues.read",
     "issues.write",
@@ -118,6 +126,25 @@ class TestSideEffect:
         # meme regime que ``mail.send``, a la difference de ``tasks.write``.
         for capability in ("issues.write", "pr.write"):
             assert has_side_effect(capability) is True
+
+    def test_ranger_la_boite_suit_la_regle_du_brouillon(self):
+        # Ne supprime jamais : les destinations qui en tiennent lieu sont
+        # refusees par le serveur.
+        assert has_side_effect("mail.organize") is False
+
+    def test_la_conversation_teams_suit_le_canal(self):
+        assert has_side_effect("teams.chat.post") is True
+
+    def test_les_fichiers_lisent_et_rangent_sans_effet_mais_suppriment_et_partagent_avec(self):
+        for capability in ("files.read", "files.write"):
+            assert has_side_effect(capability) is False
+        # Disparait pour TOUS les lecteurs ; un lien ouvre l'acces a des tiers.
+        for capability in ("files.delete", "files.share"):
+            assert has_side_effect(capability) is True
+
+    def test_les_reunions_se_lisent_sans_effet_de_bord(self):
+        assert has_side_effect("meetings.read") is False
+        assert has_side_effect("meetings.transcripts") is False
 
     def test_une_capacite_inconnue_est_traitee_comme_dangereuse(self):
         # Repli le plus PRUDENT : la traiter comme sans effet de bord la ferait

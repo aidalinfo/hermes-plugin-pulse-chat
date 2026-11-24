@@ -30,7 +30,7 @@ skill d'interface porte le catalogue et les exemples complets.
 
 | Ce que tu veux faire | Par où ça passe |
 |---|---|
-| Compte tiers délégué (courriel, agenda, To Do, Teams, GitHub) | **outils MCP** `connector_*` |
+| Compte tiers délégué (courriel, agenda, To Do, Teams et ses réunions, OneDrive / SharePoint, GitHub) | **outils MCP** `connector_*` |
 | Ton plan de travail (tâches) | **outils MCP** `plan_*` |
 | Livrer la réponse d'une routine | **outil MCP** `routine_deliver` |
 | Savoir dans quels canaux tu travailles | **outil MCP** `channels_list` |
@@ -212,7 +212,7 @@ moment ? ». Pour chaque capacité active, il rend le nom d'outil, le compte
 concerné, son `grant_id`, si l'action a un effet hors du produit, et **si le
 propriétaire doit approuver**.
 
-Le catalogue annoncé, lui, est STATIQUE : il montre les 20 capacités possibles,
+Le catalogue annoncé, lui, est STATIQUE : il montre les 28 capacités possibles,
 même celles que personne ne t'a prêtées. C'est voulu — un outil que tu ne vois pas
 est un outil que tu ne peux pas réclamer — mais cela veut dire qu'**un outil
 visible n'est pas un outil disponible**.
@@ -260,6 +260,13 @@ plateforme : ça engage quelqu'un.
   qu'un brouillon EXISTANT (`draftId` rendu par `draft`, `reply` ou `forward`).
   `update` ne crée jamais un second brouillon, et refuse un appel qui ne
   changerait rien.
+- **`connector_mail_organize` RANGE la boîte, ne supprime JAMAIS** :
+  `createFolder` (un dossier du même nom est rendu tel quel), `move` (1 à 20
+  `messageIds` vers `destinationFolderId`), `categorize` (REMPLACE les catégories ;
+  `[]` les retire). Il ne marque pas lu. Les `folderId` viennent de
+  `connector_mail_read` `action: "folders"`. Corbeille, courrier indésirable et
+  boîte d'envoi sont refusés comme destinations. Relis `failed` (résultat PAR
+  élément) ; propose la structure de dossiers à l'humain AVANT d'en créer.
 
 ### Pièces jointes sortantes — par RÉFÉRENCE, jamais par octets
 
@@ -306,6 +313,73 @@ Un fichier que tu FABRIQUES suit la même voie : écris-le dans le coffre avec
 presque toujours un consentement administrateur du locataire. Un refus de ce côté
 n'est pas quelque chose que tu peux réparer.
 
+`connector_teams_chat_post` écrit dans une CONVERSATION Teams (un-à-un ou de
+groupe) au nom du délégant : `chatId` tel que Teams le donne (`19:…@thread.v2`),
+**sans préfixe** `teams:`. Irréversible, approbation par défaut. Pour un canal
+d'équipe, c'est `connector_teams_post` ; pour répondre à qui te parle, réponds
+simplement dans la conversation.
+
+### Réunions Teams
+
+- `connector_meetings_read` : les réunions EN LIGNE d'une période (`from` + `to`,
+  31 jours au plus), participants et `joinUrl` compris ; ou UNE réunion par
+  `meetingId` ou `joinUrl`. Ne rend jamais ce qui s'est dit.
+- `connector_meetings_transcripts` : ce qui s'est dit, pour UNE réunion
+  (`action: "list"`, puis `"get"`, `transcriptId` s'il y en a plusieurs).
+  ⚠️ **Capacité DISTINCTE**, qui exige TOUJOURS l'accord administrateur du tenant.
+  Au-delà de 32 Kio, le texte est déposé ENTIER au coffre (`vault:…`) : dis-le
+  plutôt que de résumer un début. « Aucune transcription » = elle n'a pas été
+  lancée pendant la réunion (ou l'administrateur l'a fermée).
+
+### OneDrive / SharePoint
+
+`connector_files_read`, `_write`, `_delete`, `_share` n'atteignent que ce que le
+**COMPTE PRÊTÉ** peut ouvrir, dans OneDrive et les sites SharePoint.
+
+- **`connector_files_read`**, par `action` :
+  - `search` + `query` : recherche Microsoft dans OneDrive ET les sites. ⚠️ Son
+    index a **plusieurs minutes de RETARD** : un fichier tout juste déposé n'y est
+    pas — ne conclus pas qu'il n'existe pas ;
+  - `sites` (avec `query` : cherche des sites ; sans : ceux que le délégant suit)
+    → `siteId` ; `drives` + `siteId` → ses bibliothèques (`driveId`) ;
+  - `list` : un dossier (sans désignation : la racine de « mes fichiers ») ;
+  - `get` : les métadonnées ;
+  - `download` : dépose une **COPIE au coffre du canal** (visible de ses membres)
+    et rend `vault:…`, à relire avec les outils de coffre ou à joindre à un
+    courriel. Aucun octet rendu ici ; 100 Mo au plus.
+- **Pagination** : `list` (`more: true`) et `search` (`moreResultsAvailable`)
+  rendent `nextCursor` quand il y a une suite ; rappelle avec `cursor` =
+  `nextCursor`. N'affirme jamais qu'un dossier ne contient que la première page.
+- **Désigne un élément d'UNE seule façon** : `driveId` + `itemId` (rendus par
+  `search`/`list`) ; `path` (dans « mes fichiers », ou dans la bibliothèque
+  `driveId` si tu le donnes) ; ou `url` = ce que l'humain colle (lien de partage,
+  adresse d'un fichier, d'un dossier, d'une bibliothèque ou d'un site copiée du
+  navigateur, même `…/Forms/AllItems.aspx?id=…`), **passée TELLE QUELLE**, sans la
+  retoucher.
+- **Aller dans un site sans dépendre de la recherche** : `sites` → `drives` →
+  `list` avec `driveId` (+ `path` pour un sous-dossier).
+- **`connector_files_write`** : `upload` (`source` = `vault:<chemin>` ou
+  `message:<id>`, jamais d'octets ; 100 Mo), `createFolder`, `move`
+  (`targetItemId` ou `targetPath`, dans le MÊME espace que l'élément : OneDrive ↔
+  site est refusé), `rename`. `conflict: "fail"` par défaut : ne passe `replace`
+  ou `rename` qu'à la demande de l'humain.
+- **`connector_files_delete`** (corbeille du site, mais l'élément disparaît
+  sur-le-champ pour TOUS ses lecteurs : demande confirmation) et
+  **`connector_files_share`** (lien `view`/`edit`, portée `organization` /
+  `anonymous` / `users` + `recipients` ; le lien ne se reprend pas) : effet de
+  bord, approbation du délégant par défaut.
+- **Refus** :
+  - `connector_not_found` : le compte prêté n'a pas accès, ou la désignation est
+    inexacte. Reprends l'identifiant rendu par une lecture ; ne devine pas un
+    autre chemin.
+  - `connector_forbidden` (« droits SharePoint du délégant ») : un DROIT manque
+    sur cet élément ou ce site. Reconnecter n'y change rien : dis-le à l'humain,
+    qui doit l'ouvrir avec SON compte ou s'y faire ajouter.
+  - capacité absente de `connectors_available` : la case Fichiers n'est pas
+    cochée, ou le compte n'a pas consenti les scopes fichiers (souvent un accord
+    administrateur du tenant). Demande « l'accès aux fichiers », pas une
+    reconnexion à l'aveugle.
+
 ### GitHub
 
 - **Le dépôt est un PARAMÈTRE (`repo`), pas une capacité.** Le périmètre réel est
@@ -332,8 +406,9 @@ n'est pas quelque chose que tu peux réparer.
 
 Certaines capacités portent la mention « effet de bord » : l'action est visible
 hors du produit et engage le délégant. Aujourd'hui : `mail.send`, `calendar.write`,
-`tasks.delete`, `teams.post`, `issues.write`, `pr.write` — plus `mail.reply` et
-`mail.forward` en `mode: "send"`.
+`tasks.delete`, `teams.post`, `teams.chat.post`, `files.delete`, `files.share`,
+`issues.write`, `pr.write` — plus `mail.reply` et `mail.forward` en
+`mode: "send"`.
 
 Elles restent **refusées tant que le délégant n'a pas dispensé sa délégation
 d'approbation**. Ce n'est pas un bug : c'est le comportement voulu pour

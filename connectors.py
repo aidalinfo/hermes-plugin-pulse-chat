@@ -55,6 +55,10 @@ CONNECTOR_CAPABILITIES: Dict[str, bool] = {
     # aucune corbeille.
     "mail.draft.update": False,
     "mail.draft.delete": False,
+    # Range la boite (dossiers, deplacements, categories) sans rien supprimer :
+    # rien ne quitte la boite, tout se defait a la main dans Outlook. Les
+    # destinations qui tiennent lieu de suppression sont refusees cote serveur.
+    "mail.organize": False,
     "calendar.read": False,
     "calendar.write": True,
     # Taches Microsoft To Do. ``tasks.write`` couvre creation ET modification
@@ -66,6 +70,26 @@ CONNECTOR_CAPABILITIES: Dict[str, bool] = {
     # La SUPPRESSION est a part, et a effet de bord : To Do n'a pas de corbeille.
     "tasks.delete": True,
     "teams.post": True,
+    # Conversation Teams 1-1 ou de groupe, distincte du canal d'equipe (autre
+    # scope, autre regime de consentement). Remplace ``send_message`` : un envoi
+    # visible de tiers passe par une delegation nominative, sous approbation.
+    "teams.chat.post": True,
+    # ── OneDrive / SharePoint ──────────────────────────────────────────────
+    # Lire et ranger restent dans le tenant du delegant (l'historique de
+    # versions permet de revenir en arriere) : regime de ``tasks.write``. La
+    # copie deposee au coffre par ``files.read`` ne sort pas du produit.
+    "files.read": False,
+    "files.write": False,
+    # La corbeille du site existe, mais l'element disparait sur-le-champ pour
+    # TOUS ses lecteurs : regime de ``tasks.delete``.
+    "files.delete": True,
+    # Un lien ouvre l'acces a des tiers, et il est deja parti : ``mail.send``.
+    "files.share": True,
+    # ── Reunions Teams ─────────────────────────────────────────────────────
+    # "meetings.transcripts" lit ce qui s'est dit : capacite a part, comme
+    # "mail.content" face a "mail.read", mais sans effet de bord non plus.
+    "meetings.read": False,
+    "meetings.transcripts": False,
     # ── GitHub (GitHub App) ────────────────────────────────────────────────
     # Le DEPOT est un parametre, jamais une capacite : le perimetre reel est
     # celui de l'installation, choisie par le delegant. Inventer
