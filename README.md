@@ -1054,6 +1054,32 @@ redémarrer ⇒ l'appel arrive à la passerelle (carte « Dernière réponse du
 modèle » à ok) ; `hermes fallback check --live --json` (avec
 `HERMES_MANAGED_DIR` posé) vérifie la chaîne.
 
+### Jeton de tour (`x-pulse-turn-context`)
+
+À partir de la **1.29.0**. L'app signe, pour chaque tour qu'elle ouvre chez
+l'agent, un jeton opaque `turnContext` à la racine de `message.created` (rejeu
+compris) et des décisions remises (`gate.reply` sans attente active). Le plugin
+ne le lit pas : il le garde dans une `ContextVar` **du tour** (jamais une
+variable de processus) et le renvoie tel quel dans l'en-tête
+`x-pulse-turn-context` :
+
+- de ses appels HTTP vers l'app pendant ce tour ;
+- des appels d'inférence d'Hermes vers la **passerelle IA de Pulse**
+  (`<PULSE_CHAT_URL>/api/agent/ai-gateway/…`, primaire et `…/fallback/v1`), par
+  le middleware `llm_request` d'Hermes (`register_middleware`), appelé dans le
+  fil de la boucle de conversation à chaque tentative, pour les trois
+  `api_mode`. **Jamais vers un autre fournisseur.** La passerelle en déduit
+  l'exécution de routine du tour, donc le modèle et l'effort choisis pour elle.
+
+Un message mis en file derrière un tour en cours ne garde pas le jeton de ce
+tour : l'adaptateur repose celui de l'événement dans `on_processing_start`.
+Sans jeton (app antérieure, tour relancé par le navigateur), sans
+`register_middleware` (Hermes ancien, un journal le dit) ou pour les appels
+auxiliaires d'Hermes (compression, titres : ils ne passent pas par ce
+middleware), aucun en-tête : la passerelle sert le modèle de l'affectation,
+comme avant. Les sous-agents (`delegate_task`) tournent sous un contexte copié
+du tour et portent donc son jeton.
+
 ### Battement de vie du pilotage (Pulse Pilotage, CDC §7.5)
 
 À partir de la **1.19.0**. Une carte lancée depuis **Pulse Pilotage** est une

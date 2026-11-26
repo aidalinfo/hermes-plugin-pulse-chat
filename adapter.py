@@ -55,6 +55,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .agent_settings import AgentSettingsStore, refusal_message
 from . import ai_routing
+from . import turn_context
 from .approvals import (
     GATEWAY_APPROVAL_TOOL,
     build_approval_payload,
@@ -592,6 +593,11 @@ class PulseChatAdapter(BasePlatformAdapter):
         self.base_url: str = (
             _get_secret("PULSE_CHAT_URL") or extra.get("url", "")
         ).rstrip("/")
+        # Base de la passerelle IA pour le middleware ``llm_request`` (hors
+        # instance) quand ``PULSE_CHAT_URL`` ne vient que de la config.
+        global _PULSE_BASE_URL
+        if self.base_url:
+            _PULSE_BASE_URL = self.base_url
         self.token: str = _get_secret("PULSE_CHAT_TOKEN") or extra.get("token", "")
 
         # Secret PAR AGENT (`pca_...`), prioritaire sur le jeton de service pour
@@ -681,6 +687,11 @@ class PulseChatAdapter(BasePlatformAdapter):
         self._media_dir: Optional[str] = None
         # Cache borne (FIFO) des derniers message ids traites — dedup du rejeu.
         self._seen_message_ids: "OrderedDict[str, None]" = OrderedDict()
+        # Jeton de tour (#755 lot 5) de chaque evenement remis a Hermes :
+        # message id -> jeton, cache borne comme le dedup. Relu au debut du
+        # traitement (``on_processing_start``) : un message mis en file pendant
+        # un tour n'herite pas du jeton de ce tour.
+        self._turn_tokens: "OrderedDict[str, Optional[str]]" = OrderedDict()
         # Approbations en attente : requestId -> Future resolue par la trame
         # ``approval.reply``. Elles SURVIVENT a une coupure WS : l'app rejoue
         # les decisions non livrees au prochain hello.
@@ -905,6 +916,9 @@ class PulseChatAdapter(BasePlatformAdapter):
         headers = {"Authorization": f"Bearer {self.token}"}
         if self._session_token:
             headers[_SESSION_HEADER] = self._session_token
+        # Jeton du TOUR en cours (#755 lot 5) : lu dans le contexte de l'appel
+        # (``ContextVar``), donc celui du tour qui appelle, jamais un autre.
+        headers.update(turn_context.headers())
         if extra:
             headers.update(extra)
         return headers
@@ -1401,9 +1415,44 @@ class PulseChatAdapter(BasePlatformAdapter):
 
         self._last_source[slug] = source
         self._last_inbound_voice[slug] = is_voice
-        await self.handle_message(event)
+        await self._dispatch_turn(event, turn_context.from_frame(data))
         self._remember_message_id(dedup_key)
         await self._send_ack(message_id)
+
+    async def _dispatch_turn(self, event: MessageEvent, token: Optional[str]) -> None:
+        """Remet ``event`` a Hermes avec le jeton de SON tour (#755 lot 5).
+
+        Le jeton est pose AVANT que la passerelle ne cree la tache du tour
+        (elle copie le contexte), puis retire : la boucle de reception traite
+        la trame suivante dans la meme tache. Il est aussi retenu pour
+        l'evenement, que ``on_processing_start`` repose si Hermes met le
+        message en file derriere un tour en cours.
+        """
+        key = str(getattr(event, "message_id", "") or "")
+        if key:
+            self._turn_tokens[key] = token
+            self._turn_tokens.move_to_end(key)
+            while len(self._turn_tokens) > _DEDUP_MAX_IDS:
+                self._turn_tokens.popitem(last=False)
+        reset = turn_context.enter(token)
+        try:
+            await self.handle_message(event)
+        finally:
+            turn_context.leave(reset)
+
+    async def on_processing_start(self, event: MessageEvent) -> None:
+        """Crochet d'Hermes, DANS la tache du tour, juste avant l'agent.
+
+        Repose le jeton de CET evenement (``None`` s'il n'en a pas) : un
+        message traite apres un tour en cours l'est dans une tache creee
+        depuis celle de ce tour (``_spawn_drain_task``), qui en herite le
+        jeton. Pas de ``leave`` : la duree de vie est la tache du tour.
+        """
+        parent = getattr(super(), "on_processing_start", None)
+        if parent is not None:
+            await parent(event)
+        key = str(getattr(event, "message_id", "") or "")
+        turn_context.enter(self._turn_tokens.get(key))
 
     def _remember_message_id(self, key: str) -> None:
         """Enregistre un id traite dans le cache borne (eviction FIFO)."""
@@ -3068,7 +3117,9 @@ class PulseChatAdapter(BasePlatformAdapter):
             reply["requestId"],
         )
         self._last_inbound_voice[slug] = False
-        await self.handle_message(event)
+        # Reprise sans attente active : le tour neuf porte le jeton de la
+        # decision (#755 lot 5), jamais celui d'un tour precedent.
+        await self._dispatch_turn(event, turn_context.from_frame(data))
 
     # ── Identifiants d'agent (docs/48 de l'app) ─────────────────────────
     #
@@ -3309,7 +3360,8 @@ class PulseChatAdapter(BasePlatformAdapter):
             slug,
         )
         self._last_inbound_voice[slug] = False
-        await self.handle_message(event)
+        # La trame ne porte aucun jeton : le tour relance part sans en-tete.
+        await self._dispatch_turn(event, None)
 
     async def _post_agent_message(
         self, payload: Dict[str, Any], hermes_id: str
@@ -3688,6 +3740,50 @@ def _register_settings_hooks(ctx) -> None:
             register_hook(name, callback)
         except Exception as exc:
             _warn_once(f"settings_hook_{name}_failed", f"Pulse Chat: hook {name} non enregistre — {exc}")
+
+
+#: ``PULSE_CHAT_URL`` de l'adaptateur, repli du middleware ``llm_request``.
+_PULSE_BASE_URL: str = ""
+
+
+def _on_llm_request(request: Any = None, base_url: Any = None, **_kwargs: Any) -> Optional[Dict[str, Any]]:
+    """Middleware ``llm_request`` d'Hermes : jeton du tour vers la passerelle IA.
+
+    Appele de facon SYNCHRONE dans le fil de la boucle de conversation (pas
+    sur un fil de crochet borne comme ``pre_llm_call``), a chaque tentative,
+    primaire comme repli : la ``ContextVar`` lue est celle du tour qui appelle.
+    ``{"request": …}`` remplace les kwargs envoyes au SDK.
+    """
+    pulse_base = _get_secret("PULSE_CHAT_URL") or _PULSE_BASE_URL
+    rewritten = turn_context.llm_request(request, base_url, pulse_base)
+    if rewritten is None:
+        return None
+    return {"request": rewritten, "source": "pulse-chat", "reason": "turn-context"}
+
+
+def _register_turn_context_middleware(ctx) -> None:
+    """Middleware du jeton de tour vers la passerelle IA (#755 lot 5, routines).
+
+    Isole : sans lui, la passerelle sert le modele de l'affectation, comme
+    avant — mais il se VOIT, un reglage de routine ignore en silence etant
+    exactement ce qu'il faut pouvoir diagnostiquer.
+    """
+    register_middleware = getattr(ctx, "register_middleware", None)
+    if register_middleware is None:
+        _warn_once(
+            "turn_context_middleware_missing",
+            "Pulse Chat: cet Hermes ne connait pas register_middleware — le modele "
+            "et l'effort choisis pour une routine ne sont PAS appliques par la "
+            "passerelle IA (modele de l'affectation).",
+        )
+        return
+    try:
+        register_middleware("llm_request", _on_llm_request)
+    except Exception as exc:
+        _warn_once(
+            "turn_context_middleware_failed",
+            f"Pulse Chat: middleware llm_request non enregistre — {exc}",
+        )
 
 
 def _register_todo_hook(ctx) -> None:
@@ -4592,3 +4688,4 @@ def register(ctx):
     _register_browser(ctx)
     _register_todo_hook(ctx)
     _register_settings_hooks(ctx)
+    _register_turn_context_middleware(ctx)
