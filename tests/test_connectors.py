@@ -217,7 +217,13 @@ class TestParseConnectorError:
             409, {"data": {"code": "connector_grant_ambiguous", "options": []}}
         )["hint"]
         assert "accountLabel" in hint  # de quoi reconnaitre le compte nomme
-        assert "EXACTEMENT" in hint  # un seul libelle designe, sinon on demande
+        # La regle porte sur le NOMBRE de libelles designes, pas sur la forme des
+        # mots : "designe EXACTEMENT un de ces accountLabel" se lisait "qui
+        # correspond EXACTEMENT a un libelle", et l'agent ne reprenait le compte
+        # que si l'humain avait tape l'adresse mot pour mot.
+        assert "QU'UN SEUL" in hint
+        assert "fragment" in hint
+        assert "EXACTEMENT un" not in hint
         assert "DEMANDER" in hint  # l'autre moitie reste
 
     def test_un_refus_de_delegation_n_est_pas_retentable(self):

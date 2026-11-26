@@ -136,8 +136,9 @@ CONNECTOR_ERROR_HINTS: Dict[str, str] = {
     ),
     "connector_grant_ambiguous": (
         "Plusieurs comptes conviennent ; `options` les donne avec leur "
-        "`accountLabel`. Si ce que l'humain vient de dire designe EXACTEMENT un "
-        "de ces libelles, rappeler avec le `grantId` correspondant : il a deja "
+        "`accountLabel`. Si ce que l'humain vient de dire ne designe QU'UN SEUL "
+        "de ces libelles (un fragment suffit : un domaine, un nom de societe), "
+        "rappeler avec le `grantId` correspondant : il a deja "
         "choisi, le lui refaire dire est une friction inutile. Sinon (aucun "
         "libelle designe, ou plusieurs), lui DEMANDER lequel en citant les "
         "`accountLabel`. Ne jamais trancher sur autre chose que ses mots : ni le "
