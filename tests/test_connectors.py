@@ -209,6 +209,17 @@ class TestParseConnectorError:
         assert "DEMANDER" in result["hint"]
         assert result["ambiguous_options"] == [{"grantId": "g"}]
 
+    def test_l_ambiguite_renvoie_l_agent_aux_mots_de_l_humain(self):
+        # Le conseil doit porter les DEUX moities de la regle. Il n'en portait
+        # qu'une (« ne jamais choisir soi-meme »), et un agent a qui on venait de
+        # dire « eponae » reposait quand meme la question.
+        hint = parse_connector_error(
+            409, {"data": {"code": "connector_grant_ambiguous", "options": []}}
+        )["hint"]
+        assert "accountLabel" in hint  # de quoi reconnaitre le compte nomme
+        assert "EXACTEMENT" in hint  # un seul libelle designe, sinon on demande
+        assert "DEMANDER" in hint  # l'autre moitie reste
+
     def test_un_refus_de_delegation_n_est_pas_retentable(self):
         # Insister ne changerait rien et remplirait le journal de refus identiques.
         for code in (

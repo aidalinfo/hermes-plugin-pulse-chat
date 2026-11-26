@@ -2353,9 +2353,11 @@ class PulseChatAdapter(BasePlatformAdapter):
         un ``hint`` actionnable et ``retryable``. Aucune exception ne remonte —
         un connecteur en echec ne doit pas faire tomber le tour de parole.
 
-        ⚠️ Sur ``connector_grant_ambiguous``, l'agent doit DEMANDER a l'humain
-        lequel de ses comptes utiliser, puis rappeler avec ``grant_id``. Choisir
-        soi-meme enverrait un courriel depuis la mauvaise boite.
+        ⚠️ Sur ``connector_grant_ambiguous``, ``ambiguous_options`` porte les
+        comptes possibles et leur ``accountLabel``. Si les mots de l'humain en
+        designent EXACTEMENT un, rappeler avec le ``grant_id`` correspondant ;
+        sinon lui demander lequel. Trancher sur autre chose que ses mots
+        enverrait un courriel depuis la mauvaise boite.
         """
         try:
             url = connector_url(self.base_url, capability)
