@@ -135,8 +135,13 @@ CONNECTOR_ERROR_HINTS: Dict[str, str] = {
         "d'en accorder une depuis ses reglages, puis reessayer."
     ),
     "connector_grant_ambiguous": (
-        "Plusieurs comptes conviennent. DEMANDER a l'utilisateur lequel utiliser, "
-        "puis rappeler avec `grantId`. Ne jamais choisir soi-meme."
+        "Plusieurs comptes conviennent ; `options` les donne avec leur "
+        "`accountLabel`. Si ce que l'humain vient de dire designe EXACTEMENT un "
+        "de ces libelles, rappeler avec le `grantId` correspondant : il a deja "
+        "choisi, le lui refaire dire est une friction inutile. Sinon (aucun "
+        "libelle designe, ou plusieurs), lui DEMANDER lequel en citant les "
+        "`accountLabel`. Ne jamais trancher sur autre chose que ses mots : ni le "
+        "plus recent, ni le premier de la liste, ni celui qui ressemble au canal."
     ),
     "connector_ambiguous_target": (
         "Plusieurs objets du compte repondent a la designation donnee (deux listes "

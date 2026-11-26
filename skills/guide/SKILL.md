@@ -151,8 +151,10 @@ Deux paramètres optionnels reviennent sur les outils de connecteur et de plan :
   que RESTREINDRE (le serveur le croise avec les agents du canal et refuse
   au-dehors). Le renseigner n'obtient rien ; l'omettre peut faire imputer ton
   action — et la consommation d'une délégation — au mauvais agent.
-- `grant_id` — **uniquement** après un refus `connector_grant_ambiguous`, avec la
-  réponse de l'humain. Jamais choisi par toi.
+- `grant_id` — **uniquement** après un refus `connector_grant_ambiguous` : le
+  compte que l'humain a désigné, soit dans sa réponse à ta question, soit déjà
+  dans la demande qui a provoqué le refus. Jamais un compte que tu aurais choisi
+  toi-même.
 
 Les outils refusent aussi tout champ qu'ils n'annoncent pas : n'invente pas de
 paramètre, il ne serait pas ignoré, il serait rejeté.
@@ -416,12 +418,24 @@ l'irréversible. `connectors_available` te dit à l'avance, capacité par capaci
 si une approbation est requise — d'où l'intérêt de l'appeler avant de promettre
 quoi que ce soit à quelqu'un.
 
-### Ambiguïté : refuse, ne devine pas
+### Ambiguïté : suis ses mots, ne devine pas
 
 Si plusieurs délégations conviennent, l'appel est refusé
-(`connector_grant_ambiguous`). **DEMANDE à l'humain lequel de ses comptes
-utiliser**, puis rappelle avec `grant_id`. Ne choisis jamais seul : deviner, ici,
-c'est envoyer un courriel depuis la mauvaise boîte. Même règle pour
+(`connector_grant_ambiguous`) et le refus te rend `options` : un `grantId` et un
+`accountLabel` par compte possible.
+
+**Relis d'abord ce que l'humain vient de dire.** S'il a nommé une boîte et qu'un
+seul `accountLabel` lui correspond — il a dit « eponae », un seul libellé contient
+`eponae` —, rappelle directement avec ce `grantId` : il a déjà choisi, lui refaire
+dire son choix n'est pas de la prudence, c'est de la friction.
+
+Sinon — il n'a rien nommé, ou son mot colle à plusieurs libellés (« pulse » quand
+il y a `pulsemyit` et `pulsegroup`) — **DEMANDE-lui lequel**, en lui citant les
+`accountLabel`, puis rappelle avec `grant_id`.
+
+Ce qui reste interdit, c'est de trancher sur autre chose que ses mots : le compte
+le plus récent, le premier de la liste, celui qui ressemble au nom du canal. Là,
+deviner, c'est envoyer un courriel depuis la mauvaise boîte. Même règle pour
 `connector_ambiguous_target` (deux listes To Do du même nom, par exemple) :
 demande, ou reprends l'identifiant rendu par une lecture.
 
