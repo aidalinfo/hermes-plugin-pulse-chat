@@ -2354,9 +2354,9 @@ class PulseChatAdapter(BasePlatformAdapter):
         un connecteur en echec ne doit pas faire tomber le tour de parole.
 
         ⚠️ Sur ``connector_grant_ambiguous``, ``ambiguous_options`` porte les
-        comptes possibles et leur ``accountLabel``. Si les mots de l'humain en
-        designent EXACTEMENT un, rappeler avec le ``grant_id`` correspondant ;
-        sinon lui demander lequel. Trancher sur autre chose que ses mots
+        comptes possibles et leur ``accountLabel``. Si les mots de l'humain n'en
+        designent QU'UN SEUL -- un fragment suffit, pas besoin du libelle entier --,
+        rappeler avec le ``grant_id`` correspondant ; sinon lui demander lequel. Trancher sur autre chose que ses mots
         enverrait un courriel depuis la mauvaise boite.
         """
         try:
